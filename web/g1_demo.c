@@ -325,12 +325,14 @@ int main(int argc, char** argv) {
     }
     SetTargetFPS(50);
     float vx=0,vy=0,wz=0; int frame=0, falls=0;
-    while (auto_frames ? frame<auto_frames : !WindowShouldClose()) {
+    int shotf = getenv("G1_DEMO_SHOT") ? atoi(getenv("G1_DEMO_SHOT")) : 0;
+    while (auto_frames ? frame<auto_frames : (shotf ? frame<=shotf : !WindowShouldClose())) {
         if (!auto_frames) {
             vx = IsKeyDown(KEY_UP)?0.8f:(IsKeyDown(KEY_DOWN)?-0.5f:0);
             wz = IsKeyDown(KEY_LEFT)?1.0f:(IsKeyDown(KEY_RIGHT)?-1.0f:0);
             vy = 0;   // strafe removed
             if (IsKeyPressed(KEY_R)) demo_reset();
+            if (getenv("G1_DEMO_SHOT")) { vx=0.8f; wz=0; }   // capture a forward walk, not a standstill
         } else { vx=0.5f; }   // headless: command a forward walk
         cmd[0]=vx; cmd[1]=vy; cmd[2]=wz;
         demo_control_step(net);
