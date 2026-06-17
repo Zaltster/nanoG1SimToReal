@@ -60,8 +60,17 @@ def main(ckpt):
         print(f"  {name:16s} {str(v):8s} {op} {str(thr):<6} {'PASS' if ok else 'FAIL'}")
         if not ok:
             rc = 1
-    print("GATE PASS — it walks (now do the eye test: open the demo)" if rc == 0 else "GATE FAIL")
-    sys.exit(rc)
+    if rc != 0:
+        print("GATE FAIL")
+        sys.exit(1)
+
+    print("GATE PASS — it walks. Now the eye test:")
+    if sys.stdout.isatty() and not os.environ.get("NANOG1_NO_VIEW"):
+        print(f"  launching demo — arrows walk/turn, R reset, close window to exit…", flush=True)
+        subprocess.run([f"./{demo}", ckpt])          # interactive raylib viewer (blocks)
+    else:
+        print(f"  open the demo:  ./{demo} {ckpt}    (set NANOG1_NO_VIEW=1 to skip auto-launch)")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
