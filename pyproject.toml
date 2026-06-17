@@ -1,0 +1,17 @@
+[project]
+name = "nanog1"
+version = "0.1.0"
+description = "Train a Unitree G1 to walk in <60s on one GPU — pure RL from scratch."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "modal>=0.64",   # train.py launches the GPU run; clones the engine fork in-image
+]
+
+[project.optional-dependencies]
+# only needed to regenerate the baked G1 assets (tools/*.py) — the repo ships them
+assets = ["mujoco==3.9.0", "numpy"]
+
+[tool.uv]
+package = false

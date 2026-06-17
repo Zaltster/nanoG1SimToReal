@@ -1,0 +1,21 @@
+# engine fork + build artifacts (fetched/built by setup.sh, build_demo.sh)
+vendor/
+build/
+.venv/
+*.egg-info/
+
+# python
+__pycache__/
+*.pyc
+
+# logs / misc
+logs/
+*.log
+MUJOCO_LOG.TXT
+.DS_Store
+.vercel/
+
+# weights: ship ONLY the trained policy + the baked mesh asset
+*.bin
+!assets/nanoG1.bin
+!web/g1_meshes.bin

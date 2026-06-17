@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>G1 — learned to walk in 59s</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e1116;color:#e6e8eb;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden}
+  #wrap{position:relative;width:100vw;height:100vh}
+  canvas{display:block;width:100%;height:100%;background:#eaeef2;outline:none}
+  .panel{position:absolute;background:rgba(18,22,29,.80);backdrop-filter:blur(7px);
+    border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:11px 15px;line-height:1.55}
+  #stats{bottom:16px;left:16px;font-size:13px}
+  #stats b{color:#7ee787} #stats .p{color:#d2a8ff} #stats .d{opacity:.6}
+  #ctrl{bottom:16px;right:16px;text-align:right;font-size:12px;opacity:.9}
+  #load{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:14px;color:#8b949e;pointer-events:none}
+  #brand{position:absolute;top:34px;right:120px;text-align:center;pointer-events:none}
+  #brandname{font-size:60px;font-weight:800;letter-spacing:1px;line-height:1;
+    background:linear-gradient(90deg,#d2a8ff,#7ee787);-webkit-background-clip:text;
+    background-clip:text;color:transparent}
+  #hflink{display:inline-block;margin-top:12px;font-size:48px;text-decoration:none;
+    pointer-events:auto;transition:transform .15s}
+  #hflink:hover{transform:scale(1.15)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()" width="1280" height="720"></canvas>
+  <div id="load">loading G1 + policy + physics (WASM)…</div>
+  <div id="brand">
+    <div id="brandname">nanoG1</div>
+    <a id="hflink" href="https://huggingface.co/kingJulio/nanoG1" target="_blank" rel="noopener"
+       title="nanoG1 on Hugging Face">🤗</a>
+  </div>
+  <div id="stats" class="panel">
+    training&nbsp;duration:&nbsp; <span class="p" style="font-weight:700">58.9s</span><br>
+    samples:&nbsp; <b>75M</b> <b>@ 1.28M SPS</b>
+  </div>
+  <div id="ctrl" class="panel">
+    <b>arrows</b> walk/turn · <b>R</b> reset
+  </div>
+</div>
+<script>
+  // arrow keys drive the robot, not the page
+  window.addEventListener('keydown', function(e){
+    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(e.key)>=0) e.preventDefault();
+  }, {passive:false});
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    onRuntimeInitialized: function(){ var l=document.getElementById('load'); if(l) l.style.display='none'; }
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
