@@ -41,6 +41,7 @@ if [ "$WEB" = "1" ]; then
     --preload-file web/assets/font.ttf@web/assets/font.ttf \
     --shell-file web/shell.html
   cp web/favicon.png web/apple-touch-icon.png web/og.png build/web/   # static share assets
+  mkdir -p build/web/api && cp web/api/views.js build/web/api/        # serverless visit counter
   echo "Built: build/web/index.html"
   echo "  local : (cd build/web && python3 -m http.server) -> http://localhost:8000"
   echo "  deploy: vercel deploy --prod build/web"
