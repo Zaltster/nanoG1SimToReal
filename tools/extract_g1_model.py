@@ -24,6 +24,9 @@ WALL_MD5_LINUX = "432c765a0ac7b68800af4a22d446f7d3"
 # compile-time constants; structure nq=36/nv=35/nu=29/ngeom=72 identical).
 # Local mjb is DEV-ONLY (gitignored, 83 MB w/ embedded visual meshes).
 KNOWN_MD5_MACOS_ARM64 = "1cbf77af62c1bc69ea3f4e2d8a32af0a"
+# Linux arm64/Spark compiles to another stable byte fingerprint while preserving
+# the same structure. This is the DGX Spark path used for local training.
+KNOWN_MD5_LINUX_ARM64 = "9113ee61f603f557ce1265ba64ef6709"
 
 WALL_MD5 = WALL_MD5_LINUX
 OUT_DIR = pathlib.Path(os.environ.get(
@@ -64,6 +67,9 @@ def main() -> int:
         return 0
     if md5 == KNOWN_MD5_MACOS_ARM64:
         print("macOS-arm64 dev build — known platform bytes; OK for LOCAL DEV ONLY")
+        return 0
+    if md5 == KNOWN_MD5_LINUX_ARM64:
+        print("linux-arm64 Spark build — known platform bytes; OK for SPARK TRAINING")
         return 0
     print("UNKNOWN fingerprint — investigate before using this model anywhere")
     return 1

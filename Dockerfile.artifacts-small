@@ -1,0 +1,9 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    coreutils \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["bash", "-lc", "set -euo pipefail; echo '__NANOG1_ARTIFACT_LIST_BEGIN__'; find /outputs -maxdepth 2 -type f -printf '%p %s bytes\\n' | sort || true; echo '__NANOG1_ARTIFACT_LIST_END__'; mkdir -p /tmp/nanog1-small; for f in latest.bin latest_checkpoint.json checkpoint_eval.jsonl checkpoint_eval_latest.json nanoG1.bin g1_demo_latest.mp4 g1_demo_pushed.mp4 g1_demo_video.log result.json train_exit_code.txt finished_at.txt spark.json otel.jsonl gpu_samples.csv gpu_samples.err setup.log fall_metrics.jsonl train.log training_heartbeat.json training_heartbeat.jsonl supervisor_heartbeat.json supervisor_heartbeat.jsonl progress_watchdog.json progress_watchdog.jsonl checkpoint_mirror.log spark_watchdog.log puffer_logs.tar.gz; do [ -f /outputs/$f ] && cp /outputs/$f /tmp/nanog1-small/$f; done; tar -C /tmp/nanog1-small -czf /tmp/nanog1_small_outputs.tar.gz .; echo '__NANOG1_ARTIFACT_TGZ_B64_BEGIN__'; base64 -w 0 /tmp/nanog1_small_outputs.tar.gz; echo; echo '__NANOG1_ARTIFACT_TGZ_B64_END__'"]

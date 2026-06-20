@@ -91,6 +91,8 @@ static void demo_control_step(PufferNet* net) {
 // /0.25)) computed on host physics. Reports falls (robustness) + perf (tracking)
 // + raw vel errors. A "converged" checkpoint = 0 falls AND high perf across all 6.
 static unsigned g_erng;
+static double g_last_push[3] = {0,0,0};
+static int g_push_draw = 0;
 static double eval_urand(void){ g_erng=g_erng*1103515245u+12345u; return ((g_erng>>9)&0x7fffff)/(double)0x7fffff*2.0-1.0; }
 static void demo_reset_noisy(unsigned seed){
     for(int i=0;i<HC_NQ;i++) qpos[i]=hc_key_qpos[i];
@@ -135,6 +137,62 @@ static void demo_convergence_eval(PufferNet* net){
         tot_falls+=cf; tot_perf+=cp; tot_steps+=cs;
     }
     printf("RESULT conv falls=%d perf=%.3f n=%ld\n", tot_falls, tot_perf/tot_steps, tot_steps);
+}
+
+// --- push robustness eval (G1_DEMO_PUSH_EVAL=1): deterministic side/down impulses ---
+// This is the sim-side version of "bump the robot": apply bounded base-velocity
+// kicks while walking/standing and require the policy to recover without falling.
+// The renderer can also show these impulses with G1_DEMO_PUSH_VIDEO=1.
+static void eval_apply_push(void){
+    double a = 3.14159265358979323846 * (eval_urand() + 1.0);
+    double mag = 0.22 + 0.18 * (0.5 + 0.5 * eval_urand());
+    g_last_push[0] = mag * cos(a);
+    g_last_push[1] = mag * sin(a);
+    g_last_push[2] = -(0.04 + 0.06 * (0.5 + 0.5 * eval_urand()));
+    qvel[0] += g_last_push[0];  // base linear x/y side impulse
+    qvel[1] += g_last_push[1];
+    qvel[2] += g_last_push[2];  // small downward impulse
+    qvel[3] += 0.35 * eval_urand();  // base roll/pitch/yaw angular velocity impulse
+    qvel[4] += 0.35 * eval_urand();
+    qvel[5] += 0.18 * eval_urand();
+    g_push_draw = 18;
+}
+static void demo_push_eval(PufferNet* net){
+    const double batt[3][3]={{0.5,0,0},{0.0,0,0},{0.3,0,0.5}};
+    const char* nm[3]={"forward","stand","turn"};
+    int K=4, T=1000, first_push=120, push_every=150;
+    int tot_falls=0, tot_pushes=0; double tot_perf=0; long tot_steps=0;
+    printf("PUSH_EVAL battery=3 seeds=%d steps=%d/each first_push=%d every=%d side_down_impulses=1\n",
+           K, T, first_push, push_every);
+    for(int ci=0;ci<3;ci++){
+        int cf=0, cpus=0; double cp=0; long cs=0;
+        for(int k=0;k<K;k++){
+            demo_reset_noisy(7000u*ci+k+1); net_reset_state(net); g_phase=0;
+            cmd[0]=batt[ci][0]; cmd[1]=batt[ci][1]; cmd[2]=batt[ci][2];
+            for(int t=0;t<T;t++){
+                if(t>=first_push && ((t-first_push)%push_every)==0){
+                    g_erng ^= (unsigned)(0x9e3779b9u + 101u*t + 997u*k + 7919u*ci);
+                    eval_apply_push();
+                    cpus++;
+                }
+                demo_control_step(net);
+                double vb[3]; world_to_base(qpos+3,qvel,vb);
+                double ex=cmd[0]-vb[0], ey=cmd[1]-vb[1];
+                cp += exp(-(ex*ex+ey*ey)/0.25); cs++;
+                if(demo_fallen()){
+                    cf++;
+                    demo_reset_noisy(7000u*ci+k+1+104729u*(t+1));
+                    net_reset_state(net); g_phase=0;
+                    cmd[0]=batt[ci][0]; cmd[1]=batt[ci][1]; cmd[2]=batt[ci][2];
+                }
+            }
+        }
+        printf("PUSH_EVAL cmd=%-8s falls=%d pushes=%d perf=%.3f\n",
+               nm[ci], cf, cpus, cp/cs);
+        tot_falls+=cf; tot_pushes+=cpus; tot_perf+=cp; tot_steps+=cs;
+    }
+    printf("RESULT push falls=%d pushes=%d perf=%.3f n=%ld\n",
+           tot_falls, tot_pushes, tot_perf/tot_steps, tot_steps);
 }
 
 // --- posture/gait diagnostic (G1_DEMO_DIAG=1): why the gait/posture is off ---
@@ -304,6 +362,7 @@ int main(int argc, char** argv) {
     g_ls_iter = 3;   // v2s linesearch budget — the policy's native integrator (validated)
     demo_reset();
     if (getenv("G1_DEMO_EVAL")) { demo_convergence_eval(net); return 0; }  // T2 convergence harness
+    if (getenv("G1_DEMO_PUSH_EVAL")) { demo_push_eval(net); return 0; }     // disturbance robustness harness
     if (getenv("G1_DEMO_DIAG")) { demo_diag(net); return 0; }              // posture/gait diagnostic
 
     const char* mpath = getenv("G1_MESH_PATH"); if(!mpath) mpath="web/g1_meshes.bin";
@@ -326,15 +385,28 @@ int main(int argc, char** argv) {
     SetTargetFPS(50);
     float vx=0,vy=0,wz=0; int frame=0, falls=0;
     int shotf = getenv("G1_DEMO_SHOT") ? atoi(getenv("G1_DEMO_SHOT")) : 0;
-    while (auto_frames ? frame<auto_frames : (shotf ? frame<=shotf : !WindowShouldClose())) {
+    const char* shot_path = getenv("G1_DEMO_SHOT_PATH"); if(!shot_path) shot_path="web/g1_demo.png";
+    const char* record_dir = getenv("G1_DEMO_RECORD_DIR");
+    int record_frames = getenv("G1_DEMO_RECORD_FRAMES") ? atoi(getenv("G1_DEMO_RECORD_FRAMES")) : 0;
+    int recording = (record_dir && record_dir[0] && record_frames > 0);
+    int push_video = getenv("G1_DEMO_PUSH_VIDEO") ? atoi(getenv("G1_DEMO_PUSH_VIDEO")) : 0;
+    int push_first = getenv("G1_DEMO_PUSH_FIRST") ? atoi(getenv("G1_DEMO_PUSH_FIRST")) : 45;
+    int push_every = getenv("G1_DEMO_PUSH_EVERY") ? atoi(getenv("G1_DEMO_PUSH_EVERY")) : 90;
+    while (auto_frames ? frame<auto_frames : (shotf ? frame<=shotf : (recording ? frame<record_frames : !WindowShouldClose()))) {
         if (!auto_frames) {
             vx = IsKeyDown(KEY_UP)?0.8f:(IsKeyDown(KEY_DOWN)?-0.5f:0);
             wz = IsKeyDown(KEY_LEFT)?1.0f:(IsKeyDown(KEY_RIGHT)?-1.0f:0);
             vy = 0;   // strafe removed
             if (IsKeyPressed(KEY_R)) demo_reset();
-            if (getenv("G1_DEMO_SHOT")) { vx=0.8f; wz=0; }   // capture a forward walk, not a standstill
+            if (getenv("G1_DEMO_SHOT") || recording) { vx=0.8f; wz=0; }   // capture a forward walk, not a standstill
         } else { vx=0.5f; }   // headless: command a forward walk
         cmd[0]=vx; cmd[1]=vy; cmd[2]=wz;
+        if (push_video && frame >= push_first && push_every > 0 && ((frame - push_first) % push_every) == 0) {
+            g_erng ^= (unsigned)(0x9e3779b9u + 131u * frame);
+            eval_apply_push();
+            printf("PUSH_VIDEO frame=%d dv=(%+.3f,%+.3f,%+.3f)\n",
+                   frame, g_last_push[0], g_last_push[1], g_last_push[2]);
+        }
         demo_control_step(net);
         // fall check + auto-reset
         double gb[3], g[3]={0,0,-1}; world_to_base(qpos+3, g, gb);
@@ -376,6 +448,19 @@ int main(int argc, char** argv) {
                 #undef GRIDC
                 #undef FADE
             }
+            if (g_push_draw > 0) {
+                Vector3 base = {(float)qpos[0], (float)qpos[1], 0.82f};
+                Vector3 dir = {(float)g_last_push[0], (float)g_last_push[1], 0.0f};
+                float dn = sqrtf(dir.x*dir.x + dir.y*dir.y);
+                if (dn < 1e-5f) { dir.x = 1.0f; dir.y = 0.0f; dn = 1.0f; }
+                dir.x /= dn; dir.y /= dn;
+                Vector3 start = {base.x - 1.1f*dir.x, base.y - 1.1f*dir.y, base.z + 0.25f};
+                Vector3 end = {base.x - 0.25f*dir.x, base.y - 0.25f*dir.y, base.z};
+                DrawSphere(start, 0.09f, (Color){220,50,47,255});
+                DrawLine3D(start, end, (Color){220,50,47,255});
+                DrawLine3D((Vector3){end.x, end.y, end.z}, (Vector3){end.x, end.y, end.z - 0.35f}, (Color){220,50,47,255});
+                g_push_draw--;
+            }
             draw_geoms();
             EndMode3D();
             // physics-throughput bar chart embedded in the env (transparent bg).
@@ -405,7 +490,14 @@ int main(int argc, char** argv) {
             }
 #endif
             EndDrawing();
-            if (getenv("G1_DEMO_SHOT") && frame>=atoi(getenv("G1_DEMO_SHOT"))) { TakeScreenshot("web/g1_demo.png"); break; }
+            if (recording) {
+                char out[1024];
+                snprintf(out, sizeof(out), "%s/frame_%04d.png", record_dir, frame);
+                Image img = LoadImageFromScreen();
+                ExportImage(img, out);
+                UnloadImage(img);
+            }
+            if (getenv("G1_DEMO_SHOT") && frame>=atoi(getenv("G1_DEMO_SHOT"))) { TakeScreenshot(shot_path); break; }
         }
         frame++;
     }

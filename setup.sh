@@ -4,8 +4,7 @@
 # Fetches the G1-specialized engine — a *pinned* fork of PufferLib (recipe.py).
 # The browser demo links against its puffernet.h + raylib; eval.py builds on it.
 #
-# NOTE: training (`modal run train.py`) does NOT need this — it clones the same
-# pinned fork inside the Modal image. Run this only to build the demo/eval here.
+# NOTE: local/Spark training also uses this checkout.
 set -e
 cd "$(dirname "$0")"
 
@@ -25,6 +24,8 @@ echo -n "engine pinned at: "; git -C vendor/PufferLib log --oneline -1
 
 echo
 echo "✓ setup done. Next:"
+echo "    python train_local.py --smoke  # local/Spark stack check"
+echo "    python train_local.py          # local/Spark training"
 echo "    bash web/build_demo.sh        # native demo  -> ./build/g1demo assets/nanoG1.bin"
 echo "    bash web/build_demo.sh --web  # WASM demo     -> build/web/index.html"
 echo "    python eval.py assets/nanoG1.bin   # quality gate (does it walk?)"

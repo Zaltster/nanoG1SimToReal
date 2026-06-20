@@ -49,14 +49,36 @@ else
   case "$(uname -s)" in
     Darwin) fetch_raylib raylib-5.5_macos.tar.gz raylib-5.5_macos
             RL=vendor/PufferLib/raylib-5.5_macos
+            RL_INC="$RL/include"
+            RL_LIB="$RL/lib/libraylib.a"
             FW="-framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL" ;;
-    *)      fetch_raylib raylib-5.5_linux_amd64.tar.gz raylib-5.5_linux_amd64
-            RL=vendor/PufferLib/raylib-5.5_linux_amd64
+    *)      case "$(uname -m)" in
+              x86_64|amd64)
+                fetch_raylib raylib-5.5_linux_amd64.tar.gz raylib-5.5_linux_amd64
+                RL=vendor/PufferLib/raylib-5.5_linux_amd64
+                RL_INC="$RL/include"
+                RL_LIB="$RL/lib/libraylib.a"
+                ;;
+              *)
+                RL=vendor/PufferLib/raylib-5.5/src
+                if [ ! -f "$RL/libraylib.a" ]; then
+                  echo "building raylib 5.5 from source for $(uname -m)..."
+                  ( cd vendor/PufferLib
+                    curl -sL https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz -o raylib-5.5-src.tgz
+                    tar xf raylib-5.5-src.tgz
+                    rm raylib-5.5-src.tgz
+                    make -C raylib-5.5/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+                  )
+                fi
+                RL_INC="$RL"
+                RL_LIB="$RL/libraylib.a"
+                ;;
+            esac
             FW="-lGL -lpthread -ldl -lrt -lX11" ;;
   esac
   mkdir -p build
   clang -O2 web/g1_demo.c -o build/g1demo \
-    -I web -I "$RL/include" -I vendor/PufferLib/src \
-    "$RL/lib/libraylib.a" -lm $FW
+    -I web -I "$RL_INC" -I vendor/PufferLib/src \
+    "$RL_LIB" -lm $FW
   echo "Built: build/g1demo   (run: ./build/g1demo assets/nanoG1.bin)"
 fi

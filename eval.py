@@ -15,6 +15,8 @@ import operator, os, re, subprocess, sys
 THRESH = [
     ("battery_falls",   "<=", 1),
     ("battery_perf",    ">=", 0.90),
+    ("push_falls",      "<=", 0),
+    ("push_perf",       ">=", 0.70),
     ("action_jerk_rms", "<=", 0.21),
     ("ang_vel_xy_rms",  "<=", 0.21),
     ("yaw_rate_rms",    "<=", 0.20),
@@ -41,11 +43,15 @@ def main(ckpt):
                               env={**os.environ, envkey: "1"}).stdout
 
     bat = run("G1_DEMO_EVAL")        # command battery -> falls, perf
+    push = run("G1_DEMO_PUSH_EVAL")  # deterministic simulated pushes -> falls, perf
     dg  = run("G1_DEMO_DIAG")        # gait diagnostic -> jerk, ang, yaw, leg_qvel
     conv = next((l for l in bat.splitlines() if "RESULT conv" in l), "")
+    push_res = next((l for l in push.splitlines() if "RESULT push" in l), "")
     vals = {
         "battery_falls":   num(conv, "falls"),
         "battery_perf":    num(conv, "perf"),
+        "push_falls":      num(push_res, "falls"),
+        "push_perf":       num(push_res, "perf"),
         "action_jerk_rms": num(dg, "action_jerk_rms"),
         "ang_vel_xy_rms":  num(dg, "ang_vel_xy_rms"),
         "yaw_rate_rms":    num(dg, "yaw_rate_rms"),

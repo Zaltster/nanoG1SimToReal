@@ -3,24 +3,53 @@ vendor/
 build/
 .venv/
 *.egg-info/
+dist/
+htmlcov/
 
 # python
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
 
 # compiled artifacts (deploy inference shim, etc.)
 *.so
 *.dylib
 *.o
 
+# generated training/eval/export artifacts
+artifacts/
+checkpoints/
+wandb/
+runs/
+outputs/
+puffer_logs/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.mp4
+*.mov
+*.webm
+*.csv
+*.jsonl
+
 # logs / misc
 logs/
 *.log
+*.err
+*.out
 MUJOCO_LOG.TXT
 .DS_Store
 .vercel/
 
 # weights: ship ONLY the trained policy + the baked mesh asset
 *.bin
+*.pt
+*.pth
+*.onnx
+*.safetensors
 !assets/nanoG1.bin
 !web/g1_meshes.bin

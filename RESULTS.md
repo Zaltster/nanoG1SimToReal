@@ -11,14 +11,14 @@ compile/JIT time separated from steady-state throughput.
 | **time-to-walk** | **58.9 s** |
 | samples-to-walk | 75M control steps |
 | steady SPS | 1.28M samples/s (end-to-end: env + inference + learning) |
-| cost-to-walk | ~$0.17 |
-| GPU | 1× RTX PRO 6000 (sm_120) |
+| cost-to-walk | local Spark run; cloud billing scripts removed |
+| GPU | original reference run used RTX PRO 6000-class silicon; refresh this row after a Spark run |
 | method | PPO + V-trace + Muon, **pure RL from scratch** (no demos, no reference gait) |
 | seed | 42 |
 
 **What "time-to-walk" means.** The policy is trained on a 150M-step schedule (the LR
 anneals over the full budget). It crosses the frozen quality gate at ~75M samples;
-`time-to-walk = samples-to-walk / steady-SPS = 75M / 1.28M ≈ 59 s`. `train.py`
+`time-to-walk = samples-to-walk / steady-SPS = 75M / 1.28M ≈ 59 s`. `train_local.py`
 captures the checkpoint nearest 75M and ships it as `assets/nanoG1.bin`. Training is
 deterministic per built binary (fixed seed + pinned engine commit).
 
@@ -42,7 +42,7 @@ not by testimony.
 
 ## Engine throughput — the wall
 
-G1, single **RTX PRO 6000**, physics steps/s, CUDA-graph-captured steady state
+G1 reference run, physics steps/s, CUDA-graph-captured steady state
 (JIT/compile time excluded). All MuJoCo-physics engines load the **same** G1 model;
 the byte-level model fingerprints match (md5 `432c765a`) — that *is* the
 apples-to-apples guarantee.
@@ -63,24 +63,17 @@ apples-to-apples guarantee.
   conflate them.
 - **Genesis runs its own (non-MuJoCo) solver and contact model** and reparses the
   MJCF — it is a *competitor* datapoint, not matched physics. Raw steps/s across
-  engines at different dt is unit-mismatched; `bench_genesis.py` also reports the
-  dt-normalized `sim_s_per_wall_s`. Quote with the caveat.
+  engines at different dt is unit-mismatched; the original Genesis benchmark also
+  reported the dt-normalized `sim_s_per_wall_s`. Quote with the caveat.
 - warp/MJX/ours are **bit-comparable** (same model fingerprint). Genesis is not.
 
 ## Reproduce
 
 ```bash
-# training (writes the result blob with steady_sps, T_walk_s, est_cost_usd)
-modal run train.py --smoke      # validate the stack first (~$0.02)
-modal run train.py
-
-# the wall — competitor benches (smoke each first), on the same card
-NANOG1_GPU=RTX-PRO-6000 modal run bench/bench_warp.py --nconmax 32 --njmax 128
-NANOG1_GPU=RTX-PRO-6000 modal run bench/bench_mjx.py
-NANOG1_GPU=RTX-PRO-6000 modal run bench/bench_genesis.py
+python train_local.py --smoke
+python train_local.py
+python eval.py assets/nanoG1.bin
 ```
 
-Each bench prints a JSON blob between `=== ULTRA-BENCH RESULT ===` markers carrying
-the model fingerprint, the exact `opt` physics settings, and `run_meta`
-(`total_wall_s`, `est_cost_usd`). The cost is an estimate from the `RATE_*`
-constants — calibrate against your Modal dashboard after the first smoke.
+The paid cloud benchmark scripts have been removed from this Spark-first checkout.
+Refresh this file with local Spark measurements after running the local trainer.

@@ -1,0 +1,9 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    coreutils \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["bash", "-lc", "set -euo pipefail; echo '__NANOG1_ARTIFACT_LIST_BEGIN__'; find /outputs -maxdepth 2 -type f -printf '%p %s bytes\\n' | sort || true; echo '__NANOG1_ARTIFACT_LIST_END__'; tar -C /outputs -czf /tmp/nanog1_outputs.tar.gz .; echo '__NANOG1_ARTIFACT_TGZ_B64_BEGIN__'; base64 -w 0 /tmp/nanog1_outputs.tar.gz; echo; echo '__NANOG1_ARTIFACT_TGZ_B64_END__'"]

@@ -1,0 +1,9 @@
+{
+  "appId": "nanog1-spark-train",
+  "version": "0.1.0",
+  "entitlements": [
+    { "type": "gpu" },
+    { "type": "network", "mode": "host" },
+    { "type": "persist", "name": "nanog1-spark-train", "path": "/outputs" }
+  ]
+}

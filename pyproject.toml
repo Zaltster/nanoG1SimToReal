@@ -3,13 +3,27 @@ name = "nanog1"
 version = "0.1.0"
 description = "Train a Unitree G1 to walk in <60s on one GPU — pure RL from scratch."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "modal>=0.64",   # train.py launches the GPU run; clones the engine fork in-image
 ]
 
 [project.optional-dependencies]
+# local DGX Spark / CUDA training. Install the CUDA-specific torch wheel separately
+# when needed, e.g. `pip install torch --index-url https://download.pytorch.org/whl/cu128`.
+train = [
+    "gpytorch",
+    "jax",
+    "mujoco==3.9.0",
+    "numpy",
+    "playground==0.2.0",
+    "pybind11",
+    "rich",
+    "rich_argparse",
+    "scikit-learn",
+    "setuptools",
+    "wandb",
+]
 # only needed to regenerate the baked G1 assets (tools/*.py) — the repo ships them
 assets = ["mujoco==3.9.0", "numpy"]
 # real-robot deployment (deploy/). unitree_sdk2py is not on PyPI — install from
