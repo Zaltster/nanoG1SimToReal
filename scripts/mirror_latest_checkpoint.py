@@ -36,6 +36,50 @@ def archive_tree(src: Path, dst: Path) -> None:
     tmp.replace(dst)
 
 
+def read_json(path: Path) -> dict[str, object]:
+    try:
+        with path.open() as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def remove_stale_checkpoint_eval(out_dir: Path, current_counter: int) -> dict[str, object] | None:
+    latest_eval = out_dir / "checkpoint_eval_latest.json"
+    payload = read_json(latest_eval)
+    if not payload:
+        return None
+
+    run_started = read_json(out_dir / "run_metadata.json").get("time_unix")
+    eval_run_started = payload.get("run_started_unix")
+    eval_counter = int(payload.get("counter", 0) or 0)
+    stale_reasons: list[str] = []
+    if run_started is not None and eval_run_started != run_started:
+        stale_reasons.append("run_started_unix_mismatch")
+    if eval_counter > current_counter:
+        stale_reasons.append("eval_counter_ahead_of_checkpoint")
+    if not stale_reasons:
+        return None
+
+    removed: list[str] = []
+    for path in [latest_eval, out_dir / "checkpoint_eval.jsonl", *out_dir.glob(".checkpoint_eval_*.bin")]:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except FileNotFoundError:
+            pass
+    return {
+        "event": "stale_checkpoint_eval_removed",
+        "reason": ",".join(stale_reasons),
+        "eval_counter": eval_counter,
+        "current_checkpoint_counter": current_counter,
+        "run_started_unix": run_started,
+        "eval_run_started_unix": eval_run_started,
+        "removed": removed,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_dir", type=Path)
@@ -65,6 +109,9 @@ def main() -> None:
     info_tmp = args.output_dir / f".latest_checkpoint.json.{os.getpid()}.tmp"
     info_tmp.write_text(json.dumps(info, indent=2) + "\n")
     info_tmp.replace(args.output_dir / "latest_checkpoint.json")
+    stale_eval = remove_stale_checkpoint_eval(args.output_dir, counter)
+    if stale_eval:
+        print(json.dumps(stale_eval, sort_keys=True), flush=True)
     if args.archive:
         archive_tree(args.checkpoint_dir, args.output_dir / "checkpoints.tar.gz")
     print(json.dumps(info, sort_keys=True), flush=True)

@@ -44,22 +44,37 @@ class ProgressWatchdogCheckTest(unittest.TestCase):
         payload = json.loads(proc.stdout)
         return proc.returncode, payload
 
-    def test_checkpoint_progress_keeps_training_alive_when_metrics_stale(self) -> None:
+    def test_checkpoint_progress_warns_when_metrics_stale(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
             metrics = out / "fall_metrics.jsonl"
             metrics.write_text("{}\n")
-            old = time.time() - 10
+            old = time.time() - 5
             os.utime(metrics, (old, old))
             write_json(out / "latest_checkpoint.json", {"counter": 12, "checkpoint_count": 2})
 
-            rc, payload = self.run_check(out)
+            rc, payload = self.run_check(out, hard=30)
 
             self.assertEqual(rc, 10)
             self.assertEqual(payload["action"], "metrics_stale")
             self.assertEqual(payload["last_progress_source"], "checkpoint")
             self.assertEqual(payload["checkpoint_counter"], 12)
             self.assertIn("keeping trainer alive", (out / "spark_watchdog.log").read_text())
+
+    def test_checkpoint_progress_keeps_running_when_metrics_hard_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            metrics = out / "fall_metrics.jsonl"
+            metrics.write_text("{}\n")
+            old = time.time() - 30
+            os.utime(metrics, (old, old))
+            write_json(out / "latest_checkpoint.json", {"counter": 12, "checkpoint_count": 2})
+
+            rc, payload = self.run_check(out, hard=10)
+
+            self.assertEqual(rc, 10)
+            self.assertEqual(payload["action"], "metrics_hard_stale")
+            self.assertIn("keeping trainer alive", payload["reason"])
 
     def test_no_progress_stops_when_gpu_is_inactive(self) -> None:
         with tempfile.TemporaryDirectory() as td:

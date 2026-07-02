@@ -3,36 +3,16 @@ set -uo pipefail
 
 OUT="${NANOG1_OUTPUT_DIR:-/outputs}"
 mkdir -p "${OUT}"
-rm -f \
-  "${OUT}/checkpoints.tar.gz" \
-  "${OUT}/checkpoint_eval.jsonl" \
-  "${OUT}/checkpoint_eval_latest.json" \
-  "${OUT}/checkpoint_mirror.log" \
-  "${OUT}/fall_metrics.jsonl" \
-  "${OUT}/finished_at.txt" \
-  "${OUT}/gpu_samples.csv" \
-  "${OUT}/gpu_samples.err" \
-  "${OUT}/g1_demo_latest.mp4" \
-  "${OUT}/g1_demo_pushed.mp4" \
-  "${OUT}/g1_demo_video.log" \
-  "${OUT}/latest.bin" \
-  "${OUT}/latest_checkpoint.json" \
-  "${OUT}/spark_watchdog.log" \
-  "${OUT}/progress_watchdog.json" \
-  "${OUT}/progress_watchdog.jsonl" \
-  "${OUT}/.progress_watchdog_state.json" \
-  "${OUT}/nanoG1.bin" \
-  "${OUT}/otel.jsonl" \
-  "${OUT}/puffer_logs.tar.gz" \
-  "${OUT}/result.json" \
-  "${OUT}/setup.log" \
-  "${OUT}/spark.json" \
-  "${OUT}/train.log" \
-  "${OUT}/train_exit_code.txt" \
-  "${OUT}/training_heartbeat.json" \
-  "${OUT}/training_heartbeat.jsonl" \
-  "${OUT}/supervisor_heartbeat.json" \
-  "${OUT}/supervisor_heartbeat.jsonl"
+case "${OUT}" in
+  ""|"/")
+    echo "refusing to clear unsafe NANOG1_OUTPUT_DIR=${OUT}" >&2
+    exit 2
+    ;;
+esac
+find "${OUT}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+exec > >(tee -a "${OUT}/entrypoint.log") 2>&1
+date -u +"%Y-%m-%dT%H:%M:%SZ" > "${OUT}/started_at.txt"
+printf '{"time_unix":%s,"output_dir":"%s","event":"outputs_cleared"}\n' "$(date +%s)" "${OUT}" > "${OUT}/run_metadata.json"
 
 otel_event() {
   local name="$1"
@@ -110,12 +90,7 @@ train_watchdog() {
         python3 /app/scripts/mirror_latest_checkpoint.py \
           /app/vendor/PufferLib/checkpoints "${OUT}" --archive || true
       } >> "${OUT}/spark_watchdog.log" 2>&1
-      pkill -INT -f "puffer train g1gpu" 2>/dev/null || true
-      sleep 60
-      pkill -TERM -f "puffer train g1gpu" 2>/dev/null || true
-      sleep 30
-      pkill -KILL -f "puffer train g1gpu" 2>/dev/null || true
-      return 0
+      return 30
     fi
   done
 }
@@ -127,9 +102,7 @@ supervisor_heartbeat &
 heartbeat_pid=$!
 checkpoint_mirror &
 mirror_pid=$!
-train_watchdog &
-watchdog_pid=$!
-trap 'kill "${monitor_pid}" "${heartbeat_pid}" "${mirror_pid}" "${watchdog_pid}" 2>/dev/null || true' EXIT
+trap 'kill "${monitor_pid:-}" "${heartbeat_pid:-}" "${mirror_pid:-}" "${watchdog_pid:-}" "${train_pid:-}" 2>/dev/null || true' EXIT
 
 python3 /app/scripts/check_spark.py > "${OUT}/spark.json" 2>&1 || true
 otel_event spark_probe_done
@@ -139,8 +112,26 @@ otel_event train_start
 python3 /app/train_local.py \
   --stall-seconds "${NANOG1_STALL_SECONDS:-900}" \
   --checkpoint-mirror-seconds "${NANOG1_CHECKPOINT_MIRROR_INTERVAL:-120}" \
-  "$@"
-train_rc=$?
+  "$@" &
+train_pid=$!
+train_watchdog &
+watchdog_pid=$!
+
+completed_pid=""
+wait -n -p completed_pid "${train_pid}" "${watchdog_pid}"
+first_rc=$?
+if [ "${completed_pid}" = "${watchdog_pid}" ]; then
+  train_rc=30
+  otel_event watchdog_hard_stall "exit_${first_rc}"
+  kill -INT "${train_pid}" 2>/dev/null || true
+  sleep 60
+  kill -TERM "${train_pid}" 2>/dev/null || true
+  sleep 30
+  kill -KILL "${train_pid}" 2>/dev/null || true
+  wait "${train_pid}" 2>/dev/null || true
+else
+  train_rc="${first_rc}"
+fi
 set -e
 otel_event train_end "exit_${train_rc}"
 

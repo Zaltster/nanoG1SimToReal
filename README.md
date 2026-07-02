@@ -36,6 +36,147 @@ bash web/build_demo.sh && ./build/g1demo assets/nanoG1.bin   # watch it locally
 If CUDA auto-detection picks the wrong architecture, pass it explicitly:
 `NANOG1_NVCC_ARCH=sm_120 python train_local.py`.
 
+### Test RGB/depth perception in simulation
+
+The walking policy does not need retraining to test the next autonomy layer.
+Use the MuJoCo perception sandbox to mount a virtual RGB + depth camera near the
+G1 head, render a moving person stand-in, and emit the high-level walking command
+that would be sent into the RL command wrapper:
+
+```bash
+uv sync --extra perception
+G1_MODEL_DIR=artifacts/perception-sim/model-mujoco39 .venv/bin/python tools/extract_g1_model.py
+.venv/bin/python scripts/g1_perception_sim.py \
+  --model artifacts/perception-sim/model-mujoco39/g1.mjb \
+  --out artifacts/perception-sim/latest
+```
+
+Outputs:
+
+- `artifacts/perception-sim/latest/g1_head_rgb_depth_follow.mp4`
+- `artifacts/perception-sim/latest/head_rgb.mp4`
+- `artifacts/perception-sim/latest/head_depth_red_close_blue_far.mp4`
+- `artifacts/perception-sim/latest/rgb_depth_000.png`
+- `artifacts/perception-sim/latest/commands.jsonl`
+
+This is a perception/control-glue sandbox, not a replacement for the fast
+training engine. Planner modes:
+
+```bash
+# Existing oracle/math planner: uses hidden sim state for distance/bearing.
+.venv/bin/python scripts/g1_perception_sim.py --planner oracle
+
+# Camera-only local test: reads only RGB + depth frames, no world coords.
+.venv/bin/python scripts/g1_perception_sim.py \
+  --planner vision-heuristic \
+  --out artifacts/perception-sim/vision_only_smoke
+
+# Real VLM planner: sends only RGB + depth images to the model and expects JSON
+# velocity commands for the RL walking wrapper.
+OPENAI_API_KEY=... .venv/bin/python scripts/g1_perception_sim.py \
+  --planner openai-vlm \
+  --planner-period 15 \
+  --vlm-model gpt-5.5 \
+  --out artifacts/perception-sim/openai_vlm
+```
+
+`commands.jsonl` records `planner_inputs`; for `vision-heuristic` and
+`openai-vlm`, that list is `["rgb", "depth_rgb"]`.
+
+### Visualize live G1 follow perception in Foxglove
+
+Run the local Foxglove bridge from the Mac while the G1 is reachable:
+
+```bash
+.venv/bin/python scripts/live_g1_foxglove_bridge.py \
+  --robot-host 192.168.0.108 \
+  --foxglove-port 8765 \
+  --rgb-source front-rtsp \
+  --fps 3 \
+  --conf 0.05
+```
+
+Then open:
+
+```text
+https://app.foxglove.dev?ds=foxglove-websocket&ds.url=ws%3A%2F%2F127.0.0.1%3A8765
+```
+
+Published topics:
+
+- `/g1/front/rgb`: compressed front RGB image
+- `/g1/front/annotations`: human box annotation
+- `/g1/realsense/depth_color`: colorized RealSense depth image
+- `/g1/realsense/depth_annotations`: human-depth and closest-object markers
+- `/g1/follow/state`: JSON state for plotting target distance, safety stop,
+  and `vx/vy/wz/stop`
+
+This bridge is dry-run only. It publishes visualization and proposed commands,
+but does not send Unitree motion commands.
+
+### Train a native visual command policy
+
+To keep the 1.09B locomotion policy intact, train the visual layer separately:
+
+```bash
+.venv/bin/python scripts/train_visual_command_policy.py \
+  --base-walker artifacts/protected/2026-06-21/1091043328/checkpoint.bin \
+  --encoder features \
+  --steps 1200 \
+  --batch-size 1024 \
+  --eval-batch-size 4096 \
+  --hidden-dim 64 \
+  --learning-rate 0.01 \
+  --target-mode moving \
+  --trajectory-len 24 \
+  --out artifacts/visual-command/1091043328-feature-bootstrap
+```
+
+This produces `visual_command_policy.npz`, `metrics.jsonl`, and `summary.json`.
+The frozen walker is not modified. The learned layer reads only low-resolution
+RGB/depth-derived inputs and outputs `vx`, `vy`, `wz`, and `stop_probability`.
+With `--target-mode moving`, batches are sampled from random moving target
+trajectories: random start positions, random velocities, direction changes,
+boundary bounces, and occasional target loss.
+
+For a longer training-ready run with periodic checkpoints and heartbeat files:
+
+```bash
+bash scripts/run_visual_command_training.sh artifacts/visual-command/1091043328-train
+```
+
+Useful files while it runs:
+
+- `visual_training_heartbeat.json`
+- `visual_training_heartbeat.jsonl`
+- `metrics.jsonl`
+- `latest_policy.npz`
+- `best_policy.npz`
+- `latest_checkpoint.json`
+- `checkpoints/step_*.npz`
+
+Resume the same run:
+
+```bash
+VISUAL_COMMAND_RESUME=1 \
+VISUAL_COMMAND_STEPS=40000 \
+bash scripts/run_visual_command_training.sh artifacts/visual-command/1091043328-train
+```
+
+Check run status:
+
+```bash
+.venv/bin/python scripts/visual_command_status.py artifacts/visual-command/1091043328-train
+```
+
+Evaluate a saved visual policy:
+
+```bash
+.venv/bin/python scripts/train_visual_command_policy.py \
+  --eval-only artifacts/visual-command/1091043328-train/best_policy.npz \
+  --out artifacts/visual-command/1091043328-train
+```
+
 ### Run training on a Wendy Spark
 
 This repo includes a Spark container path:

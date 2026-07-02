@@ -12,6 +12,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import configparser
 import json
 import os
@@ -250,6 +251,53 @@ def archive_tree(src: Path, dst: Path) -> None:
     print(f"archived {src} to {dst}", flush=True)
 
 
+def current_run_started_unix(out_dir: Path | None) -> object:
+    if out_dir is None:
+        return None
+    try:
+        data = json.loads((out_dir / "run_metadata.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return data.get("time_unix") if isinstance(data, dict) else None
+
+
+def remove_stale_checkpoint_eval(out_dir: Path, current_counter: int) -> None:
+    latest_eval = out_dir / "checkpoint_eval_latest.json"
+    try:
+        payload = json.loads(latest_eval.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
+    if not isinstance(payload, dict):
+        return
+
+    run_started = current_run_started_unix(out_dir)
+    eval_run_started = payload.get("run_started_unix")
+    eval_counter = int(payload.get("counter", 0) or 0)
+    stale_reasons = []
+    if run_started is not None and eval_run_started != run_started:
+        stale_reasons.append("run_started_unix_mismatch")
+    if eval_counter > current_counter:
+        stale_reasons.append("eval_counter_ahead_of_checkpoint")
+    if not stale_reasons:
+        return
+
+    removed = []
+    for path in [latest_eval, out_dir / "checkpoint_eval.jsonl", *out_dir.glob(".checkpoint_eval_*.bin")]:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except FileNotFoundError:
+            pass
+    print(
+        "STALE_CHECKPOINT_EVAL_REMOVED "
+        f"reason={','.join(stale_reasons)} "
+        f"eval_counter={eval_counter} "
+        f"current_checkpoint_counter={current_counter} "
+        f"removed={','.join(removed)}",
+        flush=True,
+    )
+
+
 def mirror_latest_checkpoint(ckpt_dir: Path, out_dir: Path | None, *, reason: str) -> dict[str, object] | None:
     if out_dir is None:
         return None
@@ -272,23 +320,29 @@ def mirror_latest_checkpoint(ckpt_dir: Path, out_dir: Path | None, *, reason: st
     info_tmp = out_dir / f".latest_checkpoint.json.{os.getpid()}.tmp"
     info_tmp.write_text(json.dumps(info, indent=2) + "\n")
     info_tmp.replace(out_dir / "latest_checkpoint.json")
+    remove_stale_checkpoint_eval(out_dir, counter)
     return info
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 METRIC_RE = re.compile(r"\b(perf|score|episode_return|episode_length|vel_err|falls)\s+(-?[0-9.]+)")
-STEPS_RE = re.compile(r"\bSteps\s+([0-9.]+)\s*([KMG]?)")
+STEPS_RE = re.compile(r"\bSteps\s+([0-9.]+)\s*([KMGB]?)")
 CONV_CMD_RE = re.compile(r"CONV_EVAL cmd=(\w+)\s+falls=(\d+)\s+perf=([0-9.]+)\s+lin_err=([0-9.]+)\s+ang_err=([0-9.]+)")
 PUSH_CMD_RE = re.compile(r"PUSH_EVAL cmd=(\w+)\s+falls=(\d+)\s+pushes=(\d+)\s+perf=([0-9.]+)")
 RESULT_RE = re.compile(r"RESULT\s+(\w+)\s+falls=(\d+)(?:\s+pushes=(\d+))?\s+perf=([0-9.]+)")
 DIAG_WALK_RE = re.compile(r"DIAG walk .* falls=(\d+) .* pelvis_z=([0-9.]+)")
 DIAG_GAIT_RE = re.compile(r"action_jerk_rms=([0-9.]+)\s+leg_qvel_rms=([0-9.]+)")
+DIAG_FOOT_SEP_RE = re.compile(r"DIAG FOOT_SEP: lateral_mean=([-0-9.]+)m lateral_min=([-0-9.]+)m under_0\.10m_pct=([0-9.]+)%")
 EOF_SENTINEL = object()
 EVAL_DEMO_READY = False
+EVAL_BUILD_TIMEOUT_SECONDS = int(os.environ.get("NANOG1_EVAL_BUILD_TIMEOUT_SECONDS", "600"))
+EVAL_MODE_TIMEOUT_SECONDS = int(os.environ.get("NANOG1_EVAL_MODE_TIMEOUT_SECONDS", "120"))
+DEPLOY_MAX_FALLS = int(os.environ.get("NANOG1_DEPLOY_MAX_FALLS", "0"))
+DEPLOY_MIN_FOOT_SEP_M = float(os.environ.get("NANOG1_DEPLOY_MIN_FOOT_SEP_M", "0.10"))
 
 
 def parse_count(value: str, suffix: str) -> float:
-    mult = {"": 1.0, "K": 1e3, "M": 1e6, "G": 1e9}[suffix]
+    mult = {"": 1.0, "K": 1e3, "M": 1e6, "G": 1e9, "B": 1e9}[suffix]
     return float(value) * mult
 
 
@@ -305,7 +359,7 @@ def write_training_heartbeat(event: dict[str, object]) -> None:
         return
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"time_unix": round(time.time(), 3), **event}
-    tmp = OUTPUT_DIR / ".training_heartbeat.json.tmp"
+    tmp = OUTPUT_DIR / f".training_heartbeat.json.{os.getpid()}.{time.time_ns()}.tmp"
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     tmp.replace(OUTPUT_DIR / "training_heartbeat.json")
     with (OUTPUT_DIR / "training_heartbeat.jsonl").open("a") as f:
@@ -322,7 +376,7 @@ def ensure_eval_demo() -> None:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=600,
+        timeout=EVAL_BUILD_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stdout[-4000:])
@@ -338,9 +392,19 @@ def run_demo_mode(ckpt: Path, mode_env: str) -> str:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=EVAL_MODE_TIMEOUT_SECONDS,
     )
     return proc.stdout
+
+
+def run_checkpoint_eval_snapshot(snapshot: Path, *, counter: int | None, reason: str) -> dict[str, object] | None:
+    try:
+        return run_checkpoint_eval(snapshot, OUTPUT_DIR, counter=counter, reason=reason)
+    finally:
+        try:
+            snapshot.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def parse_checkpoint_eval(conv: str, push: str, diag: str) -> dict[str, object]:
@@ -378,6 +442,10 @@ def parse_checkpoint_eval(conv: str, push: str, diag: str) -> dict[str, object]:
         elif match := DIAG_GAIT_RE.search(line):
             payload["action_jerk_rms"] = float(match.group(1))
             payload["leg_qvel_rms"] = float(match.group(2))
+        elif match := DIAG_FOOT_SEP_RE.search(line):
+            payload["foot_sep_mean_m"] = float(match.group(1))
+            payload["foot_sep_min_m"] = float(match.group(2))
+            payload["foot_sep_under_0p10_pct"] = float(match.group(3))
     payload["commands"] = commands
     payload["push_commands"] = push_commands
     if "forward" in commands:
@@ -391,6 +459,24 @@ def parse_checkpoint_eval(conv: str, push: str, diag: str) -> dict[str, object]:
     return payload
 
 
+def checkpoint_eval_deployable(event: dict[str, object] | None) -> tuple[bool, str]:
+    if not event:
+        return False, "missing_eval"
+    if not event.get("ok"):
+        return False, str(event.get("error") or "eval_failed")[-200:]
+    for key in ("battery_falls", "forward_falls", "diag_falls", "push_falls"):
+        if int(event.get(key, 0) or 0) > DEPLOY_MAX_FALLS:
+            return False, f"{key}={event.get(key)}"
+    foot_sep = event.get("foot_sep_min_m")
+    if foot_sep is None:
+        return False, "missing_foot_sep"
+    if float(foot_sep) < DEPLOY_MIN_FOOT_SEP_M:
+        return False, f"foot_sep_min_m={foot_sep}"
+    if float(event.get("foot_sep_under_0p10_pct", 0.0) or 0.0) > 0.0:
+        return False, f"foot_sep_under_0p10_pct={event.get('foot_sep_under_0p10_pct')}"
+    return True, ""
+
+
 def run_checkpoint_eval(ckpt: Path, out_dir: Path | None, *, counter: int | None, reason: str) -> dict[str, object] | None:
     if out_dir is None or not ckpt.exists():
         return None
@@ -398,6 +484,7 @@ def run_checkpoint_eval(ckpt: Path, out_dir: Path | None, *, counter: int | None
     started = time.time()
     event: dict[str, object] = {
         "time_unix": round(started, 3),
+        "run_started_unix": current_run_started_unix(out_dir),
         "checkpoint": str(ckpt),
         "counter": counter,
         "reason": reason,
@@ -420,7 +507,7 @@ def run_checkpoint_eval(ckpt: Path, out_dir: Path | None, *, counter: int | None
     event["wall_s"] = round(time.time() - started, 3)
     with (out_dir / "checkpoint_eval.jsonl").open("a") as f:
         f.write(json.dumps(event, sort_keys=True) + "\n")
-    tmp = out_dir / ".checkpoint_eval_latest.json.tmp"
+    tmp = out_dir / f".checkpoint_eval_latest.json.{os.getpid()}.{time.time_ns()}.tmp"
     tmp.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
     tmp.replace(out_dir / "checkpoint_eval_latest.json")
     write_training_heartbeat(
@@ -435,6 +522,8 @@ def run_checkpoint_eval(ckpt: Path, out_dir: Path | None, *, counter: int | None
             "push_perf": event.get("push_perf"),
             "push_falls": event.get("push_falls"),
             "leg_qvel_rms": event.get("leg_qvel_rms"),
+            "foot_sep_min_m": event.get("foot_sep_min_m"),
+            "foot_sep_under_0p10_pct": event.get("foot_sep_under_0p10_pct"),
             "wall_s": event.get("wall_s"),
         }
     )
@@ -509,6 +598,10 @@ def wait_for_training(
     last_mirror_counter: int | None = None
     last_eval_at = 0.0
     last_eval_counter: int | None = None
+    eval_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkpoint-eval")
+    eval_future: concurrent.futures.Future[dict[str, object] | None] | None = None
+    eval_future_counter: int | None = None
+    eval_started_at: float | None = None
     process_exit_seen_at: float | None = None
     raw_log_path = OUTPUT_DIR / "train.log" if OUTPUT_DIR else None
     raw_log = raw_log_path.open("a") if raw_log_path else None
@@ -617,6 +710,40 @@ def wait_for_training(
                             )
 
             now = time.perf_counter()
+            if eval_future is not None and eval_future.done():
+                try:
+                    eval_event = eval_future.result()
+                except Exception as exc:
+                    eval_event = {"ok": False, "error": str(exc)[-4000:]}
+                    if OUTPUT_DIR:
+                        event = {
+                            "time_unix": round(time.time(), 3),
+                            "run_started_unix": current_run_started_unix(OUTPUT_DIR),
+                            "counter": eval_future_counter,
+                            "reason": "periodic",
+                            **eval_event,
+                            "wall_s": round(time.perf_counter() - (eval_started_at or time.perf_counter()), 3),
+                        }
+                        with (OUTPUT_DIR / "checkpoint_eval.jsonl").open("a") as f:
+                            f.write(json.dumps(event, sort_keys=True) + "\n")
+                        tmp = OUTPUT_DIR / f".checkpoint_eval_latest.json.{os.getpid()}.{time.time_ns()}.tmp"
+                        tmp.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
+                        tmp.replace(OUTPUT_DIR / "checkpoint_eval_latest.json")
+                if eval_event:
+                    print(
+                        "CHECKPOINT_EVAL "
+                        f"counter={eval_future_counter} "
+                        f"ok={eval_event.get('ok')} "
+                        f"forward_perf={eval_event.get('forward_perf')} "
+                        f"stand_perf={eval_event.get('stand_perf')} "
+                        f"push_falls={eval_event.get('push_falls')} "
+                        f"push_perf={eval_event.get('push_perf')} "
+                        f"foot_sep_min_m={eval_event.get('foot_sep_min_m')}",
+                        flush=True,
+                    )
+                eval_future = None
+                eval_future_counter = None
+                eval_started_at = None
             proc_rc = proc.poll()
             if proc_rc is not None:
                 if process_exit_seen_at is None:
@@ -677,25 +804,30 @@ def wait_for_training(
                     and checkpoint_eval_seconds > 0
                     and (last_eval_counter != int(info["counter"]))
                     and now - last_eval_at >= checkpoint_eval_seconds
+                    and eval_future is None
                 ):
-                    eval_event = run_checkpoint_eval(
-                        OUTPUT_DIR / "latest.bin",
-                        OUTPUT_DIR,
-                        counter=int(info["counter"]),
+                    checkpoint_counter = int(info["counter"])
+                    snapshot = OUTPUT_DIR / f".checkpoint_eval_{checkpoint_counter}_{os.getpid()}.bin"
+                    shutil.copy2(OUTPUT_DIR / "latest.bin", snapshot)
+                    last_eval_counter = checkpoint_counter
+                    last_eval_at = time.perf_counter()
+                    eval_started_at = last_eval_at
+                    eval_future_counter = checkpoint_counter
+                    write_training_heartbeat(
+                        {
+                            "event": "checkpoint_eval_started",
+                            "progress_id": progress_id,
+                            "wall_s": round(last_eval_at - t0, 3),
+                            "steps": last.get("steps"),
+                            "counter": checkpoint_counter,
+                        }
+                    )
+                    eval_future = eval_executor.submit(
+                        run_checkpoint_eval_snapshot,
+                        snapshot,
+                        counter=checkpoint_counter,
                         reason="periodic",
                     )
-                    last_eval_counter = int(info["counter"])
-                    last_eval_at = time.perf_counter()
-                    if eval_event:
-                        print(
-                            "CHECKPOINT_EVAL "
-                            f"counter={info['counter']} "
-                            f"forward_perf={eval_event.get('forward_perf')} "
-                            f"stand_perf={eval_event.get('stand_perf')} "
-                            f"push_falls={eval_event.get('push_falls')} "
-                            f"push_perf={eval_event.get('push_perf')}",
-                            flush=True,
-                        )
                 last_mirror_at = now
             if max_train_seconds > 0 and now - t0 >= max_train_seconds:
                 stop_reason = f"training time limit reached after {max_train_seconds}s"
@@ -746,6 +878,7 @@ def wait_for_training(
                 request_training_stop(proc, stop_reason)
                 break
     finally:
+        eval_executor.shutdown(wait=False, cancel_futures=True)
         if raw_log:
             raw_log.close()
 
@@ -865,6 +998,7 @@ def train_local(
     print(json.dumps(result, indent=2))
     print("=== END RESULT ===\n", flush=True)
 
+    export_allowed = True
     if OUTPUT_DIR:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         archive_tree(PUFFER / "checkpoints", OUTPUT_DIR / "checkpoints.tar.gz")
@@ -881,24 +1015,44 @@ def train_local(
             if eval_event:
                 result["final_checkpoint_eval"] = {
                     "battery_perf": eval_event.get("battery_perf"),
+                    "battery_falls": eval_event.get("battery_falls"),
                     "forward_perf": eval_event.get("forward_perf"),
+                    "forward_falls": eval_event.get("forward_falls"),
                     "stand_perf": eval_event.get("stand_perf"),
+                    "diag_falls": eval_event.get("diag_falls"),
                     "push_falls": eval_event.get("push_falls"),
                     "push_perf": eval_event.get("push_perf"),
                     "leg_qvel_rms": eval_event.get("leg_qvel_rms"),
+                    "foot_sep_min_m": eval_event.get("foot_sep_min_m"),
+                    "foot_sep_under_0p10_pct": eval_event.get("foot_sep_under_0p10_pct"),
                 }
+                export_allowed, blocker = checkpoint_eval_deployable(eval_event)
+                result["final_checkpoint_deployable"] = export_allowed
+                result["final_checkpoint_blocker"] = blocker or None
         if latest_path:
             latest_path = OUTPUT_DIR / "latest.bin"
-        if export_path:
+        if export_path and export_allowed:
             shutil.copy2(export_path, OUTPUT_DIR / "nanoG1.bin")
             print(f"copied {export_strategy} checkpoint to {OUTPUT_DIR / 'nanoG1.bin'}", flush=True)
+        elif export_path:
+            print(
+                f"not copying deploy artifact: final checkpoint failed deploy gate "
+                f"({result.get('final_checkpoint_blocker')})",
+                flush=True,
+            )
         (OUTPUT_DIR / "result.json").write_text(json.dumps(result, indent=2) + "\n")
 
-    if not smoke and export_path:
+    if not smoke and export_path and export_allowed:
         out = ROOT / "assets" / "nanoG1.bin"
         out.parent.mkdir(exist_ok=True)
         shutil.copy2(export_path, out)
         print(f"wrote {out}", flush=True)
+    elif not smoke and export_path:
+        print(
+            f"not writing {ROOT / 'assets' / 'nanoG1.bin'}: final checkpoint failed deploy gate "
+            f"({result.get('final_checkpoint_blocker')})",
+            flush=True,
+        )
     return result
 
 

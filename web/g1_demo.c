@@ -29,6 +29,8 @@
 #define DEMO_DECIM 5
 #define DEMO_NEWTON 2
 #define DEMO_ACTION_SCALE 0.5f
+#define G1_DEMO_LFOOT_BODY 7
+#define G1_DEMO_RFOOT_BODY 13
 
 // --- env state ---
 static double qpos[HC_NQ], qvel[HC_NV];
@@ -105,6 +107,26 @@ static void demo_reset_noisy(unsigned seed){
 static int demo_fallen(void){
     double gb[3],g[3]={0,0,-1}; world_to_base(qpos+3,g,gb);
     return (qpos[2]<0.35 || gb[2]>-0.6 || !isfinite(qpos[2]));
+}
+static double demo_foot_lateral_sep(void){
+    fk(qpos);
+    double dw[3] = {
+        xpos[G1_DEMO_LFOOT_BODY][0] - xpos[G1_DEMO_RFOOT_BODY][0],
+        xpos[G1_DEMO_LFOOT_BODY][1] - xpos[G1_DEMO_RFOOT_BODY][1],
+        xpos[G1_DEMO_LFOOT_BODY][2] - xpos[G1_DEMO_RFOOT_BODY][2],
+    };
+    double db[3]; world_to_base(qpos+3, dw, db);
+    return db[1];
+}
+static double demo_clamp(double x, double lo, double hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+static void demo_heading_xy(double* hx, double* hy) {
+    double q0=qpos[3],q1=qpos[4],q2=qpos[5],q3=qpos[6];
+    *hx=1.0-2.0*(q2*q2+q3*q3);
+    *hy=2.0*(q1*q2+q0*q3);
+    double hn=sqrt((*hx)*(*hx)+(*hy)*(*hy));
+    if(hn>1e-6){*hx/=hn;*hy/=hn;} else {*hx=1;*hy=0;}
 }
 // reset the recurrent (MinGRU) hidden state — training resets it on every
 // episode boundary; the eval MUST too or sub-runs inherit stale memory.
@@ -202,6 +224,7 @@ static void demo_diag(PufferNet* net){
     double minz=9, maxz=-9;
     double bp2=0,br2=0,wxy2=0,wz2=0,vz2=0;   // wobble: pitch/roll variance, ang-vel & bob RMS
     double arate2=0, legqv2=0, pact[12]={0}; int havep=0;  // GAIT smoothness: action jerk + leg motion energy
+    double foot_sep_sum=0, foot_sep_min=9, foot_sep_bad=0;
     for(int t=0;t<T;t++){
         demo_control_step(net);
         if(demo_fallen()){ falls++; demo_reset(); net_reset_state(net); cmd[0]=0.5; havep=0; continue; }
@@ -217,6 +240,10 @@ static void demo_diag(PufferNet* net){
         if(havep){ for(int j=0;j<12;j++){ double d=act[j]-pact[j]; arate2+=d*d; } }
         for(int j=0;j<12;j++){ pact[j]=act[j]; legqv2+=qvel[6+j]*qvel[6+j]; }
         havep=1;
+        double fsep = demo_foot_lateral_sep();
+        foot_sep_sum += fsep;
+        if(fsep < foot_sep_min) foot_sep_min = fsep;
+        if(fsep < 0.10) foot_sep_bad++;
         if(qpos[2]<minz)minz=qpos[2]; if(qpos[2]>maxz)maxz=qpos[2]; n++;
     }
     double R=180.0/M_PI;
@@ -232,6 +259,8 @@ static void demo_diag(PufferNet* net){
         0.05*wxy2/n, 0.25*wxy2/n, wxy2/n);
     printf("DIAG GAIT-SMOOTHNESS: action_jerk_rms=%.4f  leg_qvel_rms=%.3frad/s  (lower=smoother gait)\n",
         arate, legqv);
+    printf("DIAG FOOT_SEP: lateral_mean=%.3fm lateral_min=%.3fm under_0.10m_pct=%.1f%%  (left minus right in base frame)\n",
+        foot_sep_sum/n, foot_sep_min, 100.0*foot_sep_bad/n);
     double lg=0,wa=0,ar=0;
     for(int j=0;j<12;j++) lg+=fabs(dev[j]/n);
     for(int j=12;j<15;j++) wa+=fabs(dev[j]/n);
@@ -392,14 +421,80 @@ int main(int argc, char** argv) {
     int push_video = getenv("G1_DEMO_PUSH_VIDEO") ? atoi(getenv("G1_DEMO_PUSH_VIDEO")) : 0;
     int push_first = getenv("G1_DEMO_PUSH_FIRST") ? atoi(getenv("G1_DEMO_PUSH_FIRST")) : 45;
     int push_every = getenv("G1_DEMO_PUSH_EVERY") ? atoi(getenv("G1_DEMO_PUSH_EVERY")) : 90;
+    int record_cmd = getenv("G1_DEMO_CMD_VX") || getenv("G1_DEMO_CMD_VY") || getenv("G1_DEMO_CMD_WZ");
+    float record_vx = getenv("G1_DEMO_CMD_VX") ? strtof(getenv("G1_DEMO_CMD_VX"), NULL) : 0.8f;
+    float record_vy = getenv("G1_DEMO_CMD_VY") ? strtof(getenv("G1_DEMO_CMD_VY"), NULL) : 0.0f;
+    float record_wz = getenv("G1_DEMO_CMD_WZ") ? strtof(getenv("G1_DEMO_CMD_WZ"), NULL) : 0.0f;
+    int vision_planner = getenv("G1_DEMO_VISION_PLANNER") ? atoi(getenv("G1_DEMO_VISION_PLANNER")) : 0;
+    double target_x0 = getenv("G1_DEMO_TARGET_X") ? strtod(getenv("G1_DEMO_TARGET_X"), NULL) : 1.2;
+    double target_y0 = getenv("G1_DEMO_TARGET_Y") ? strtod(getenv("G1_DEMO_TARGET_Y"), NULL) : 0.35;
+    double target_vx = getenv("G1_DEMO_TARGET_VX") ? strtod(getenv("G1_DEMO_TARGET_VX"), NULL) : 0.0;
+    double target_vy = getenv("G1_DEMO_TARGET_VY") ? strtod(getenv("G1_DEMO_TARGET_VY"), NULL) : 0.0;
+    int planner_period = getenv("G1_DEMO_PLANNER_PERIOD") ? atoi(getenv("G1_DEMO_PLANNER_PERIOD")) : 50;
+    int command_timeout = getenv("G1_DEMO_CMD_TIMEOUT") ? atoi(getenv("G1_DEMO_CMD_TIMEOUT")) : 55;
+    int allow_strafe = getenv("G1_DEMO_ALLOW_STRAFE") ? atoi(getenv("G1_DEMO_ALLOW_STRAFE")) : 1;
+    int lost_start = getenv("G1_DEMO_TARGET_LOST_START") ? atoi(getenv("G1_DEMO_TARGET_LOST_START")) : -1;
+    int lost_end = getenv("G1_DEMO_TARGET_LOST_END") ? atoi(getenv("G1_DEMO_TARGET_LOST_END")) : -1;
+    double stop_dist = getenv("G1_DEMO_STOP_DIST") ? strtod(getenv("G1_DEMO_STOP_DIST"), NULL) : 0.35;
+    double fov_rad = getenv("G1_DEMO_FOV_DEG") ? strtod(getenv("G1_DEMO_FOV_DEG"), NULL) * 3.141592653589793 / 180.0 : 1.05;
+    double planner_max_vx = getenv("G1_DEMO_PLANNER_MAX_VX") ? strtod(getenv("G1_DEMO_PLANNER_MAX_VX"), NULL) : 0.35;
+    double planner_max_vy = getenv("G1_DEMO_PLANNER_MAX_VY") ? strtod(getenv("G1_DEMO_PLANNER_MAX_VY"), NULL) : 0.18;
+    double planner_max_wz = getenv("G1_DEMO_PLANNER_MAX_WZ") ? strtod(getenv("G1_DEMO_PLANNER_MAX_WZ"), NULL) : 0.45;
+    double plan_vx = 0.0, plan_vy = 0.0, plan_wz = 0.0, target_dist = 0.0, target_bearing = 0.0;
+    int plan_frame = -1000000, plan_visible = 0, plan_updates = 0, plan_stops = 0, reached_once = 0;
     while (auto_frames ? frame<auto_frames : (shotf ? frame<=shotf : (recording ? frame<record_frames : !WindowShouldClose()))) {
-        if (!auto_frames) {
+        double t_s = frame * (DEMO_DT * DEMO_DECIM);
+        double target_x = target_x0 + target_vx * t_s;
+        double target_y = target_y0 + target_vy * t_s;
+        if (vision_planner && (frame == 0 || (planner_period > 0 && frame % planner_period == 0))) {
+            double hx, hy; demo_heading_xy(&hx, &hy);
+            double dx = target_x - qpos[0], dy = target_y - qpos[1];
+            double front = dx * hx + dy * hy;
+            double left = dx * (-hy) + dy * hx;
+            target_dist = sqrt(dx * dx + dy * dy);
+            target_bearing = atan2(left, front);
+            int forced_lost = lost_start >= 0 && frame >= lost_start && (lost_end < 0 || frame < lost_end);
+            plan_visible = !forced_lost && front > 0.0 && fabs(target_bearing) <= fov_rad && target_dist < 3.5;
+            if (!plan_visible || target_dist <= stop_dist) {
+                plan_vx = plan_vy = plan_wz = 0.0;
+                plan_stops++;
+                if (target_dist <= stop_dist) reached_once = 1;
+            } else if (allow_strafe) {
+                plan_vx = demo_clamp(0.65 * (front - stop_dist), 0.0, planner_max_vx);
+                plan_vy = demo_clamp(0.55 * left, -planner_max_vy, planner_max_vy);
+                plan_wz = demo_clamp(0.85 * target_bearing, -planner_max_wz, planner_max_wz);
+            } else {
+                plan_vy = 0.0;
+                plan_wz = demo_clamp(1.1 * target_bearing, -planner_max_wz, planner_max_wz);
+                plan_vx = fabs(target_bearing) > 0.35 ? 0.0 : demo_clamp(0.65 * (front - stop_dist), 0.0, planner_max_vx);
+            }
+            plan_frame = frame;
+            plan_updates++;
+            printf("VISION_PLAN frame=%d visible=%d dist=%.3f bearing=%.3f cmd=(%+.3f,%+.3f,%+.3f)%s\n",
+                   frame, plan_visible, target_dist, target_bearing, plan_vx, plan_vy, plan_wz,
+                   reached_once ? " reached=1" : "");
+        }
+        if (vision_planner) {
+            if (frame - plan_frame <= command_timeout) {
+                vx = (float)plan_vx; vy = (float)plan_vy; wz = (float)plan_wz;
+            } else {
+                vx = vy = wz = 0.0f;
+            }
+        } else if (!auto_frames) {
             vx = IsKeyDown(KEY_UP)?0.8f:(IsKeyDown(KEY_DOWN)?-0.5f:0);
             wz = IsKeyDown(KEY_LEFT)?1.0f:(IsKeyDown(KEY_RIGHT)?-1.0f:0);
             vy = 0;   // strafe removed
             if (IsKeyPressed(KEY_R)) demo_reset();
-            if (getenv("G1_DEMO_SHOT") || recording) { vx=0.8f; wz=0; }   // capture a forward walk, not a standstill
-        } else { vx=0.5f; }   // headless: command a forward walk
+            if (getenv("G1_DEMO_SHOT") || recording) {
+                vx = record_cmd ? record_vx : 0.8f;
+                vy = record_cmd ? record_vy : 0.0f;
+                wz = record_cmd ? record_wz : 0.0f;
+            }
+        } else {
+            vx = record_cmd ? record_vx : 0.5f;
+            vy = record_cmd ? record_vy : 0.0f;
+            wz = record_cmd ? record_wz : 0.0f;
+        }   // headless: command a forward walk unless command override is set
         cmd[0]=vx; cmd[1]=vy; cmd[2]=wz;
         if (push_video && frame >= push_first && push_every > 0 && ((frame - push_first) % push_every) == 0) {
             g_erng ^= (unsigned)(0x9e3779b9u + 131u * frame);
@@ -414,9 +509,7 @@ int main(int argc, char** argv) {
 
         if (!auto_frames) {
             // camera sits ahead of the robot's heading -> it always walks TOWARD the viewer
-            double q0=qpos[3],q1=qpos[4],q2=qpos[5],q3=qpos[6];
-            double hx=1.0-2.0*(q2*q2+q3*q3), hy=2.0*(q1*q2+q0*q3);
-            double hn=sqrt(hx*hx+hy*hy); if(hn>1e-6){hx/=hn;hy/=hn;} else {hx=1;hy=0;}
+            double hx, hy; demo_heading_xy(&hx, &hy);
             static double sfx=1.0, sfy=0.0;   // smooth heading to kill per-step gait yaw jitter
             sfx+=(hx-sfx)*0.06; sfy+=(hy-sfy)*0.06;
             double sn=sqrt(sfx*sfx+sfy*sfy); double cx=sfx/sn, cy=sfy/sn;
@@ -461,8 +554,20 @@ int main(int argc, char** argv) {
                 DrawLine3D((Vector3){end.x, end.y, end.z}, (Vector3){end.x, end.y, end.z - 0.35f}, (Color){220,50,47,255});
                 g_push_draw--;
             }
+            if (vision_planner) {
+                DrawCylinder((Vector3){(float)target_x, (float)target_y, 0.025f}, 0.16f, 0.16f, 0.05f, 24, (Color){31,111,235,255});
+                DrawSphere((Vector3){(float)target_x, (float)target_y, 0.35f}, 0.10f, plan_visible ? (Color){31,111,235,255} : (Color){148,154,164,255});
+                DrawLine3D((Vector3){(float)target_x, (float)target_y, 0.05f}, (Vector3){(float)target_x, (float)target_y, 0.55f}, (Color){31,111,235,255});
+            }
             draw_geoms();
             EndMode3D();
+            DrawTextEx(g_font, TextFormat("cmd vx=%+.2f  vy=%+.2f  wz=%+.2f", vx, vy, wz),
+                       (Vector2){32, 32}, 24, 1.0f, (Color){32,36,44,255});
+            if (vision_planner) {
+                DrawTextEx(g_font, TextFormat("vision plan visible=%d  dist=%.2fm  bearing=%+.2frad  updates=%d",
+                           plan_visible, target_dist, target_bearing, plan_updates),
+                           (Vector2){32, 62}, 22, 1.0f, (Color){32,36,44,255});
+            }
             // physics-throughput bar chart embedded in the env (transparent bg).
             // REAL matched-config numbers (docs/RESULTS.md, docs/genesis_g1.md): same
             // RTX 5090-class GPU, G1, fp32, foot-floor contact, pure stepping. Ours is
@@ -504,6 +609,14 @@ int main(int argc, char** argv) {
     if (auto_frames) {
         printf("RESULT g1_demo frames=%d falls=%d final_pelvis_z=%.3f pass=%d\n",
                frame, falls, qpos[2], (isfinite(qpos[2]) && qpos[2]>0.3)?1:0);
+        if (vision_planner) {
+            double target_x = target_x0 + target_vx * frame * (DEMO_DT * DEMO_DECIM);
+            double target_y = target_y0 + target_vy * frame * (DEMO_DT * DEMO_DECIM);
+            double dx = target_x - qpos[0], dy = target_y - qpos[1];
+            printf("RESULT vision_planner updates=%d stops=%d reached=%d final_dist=%.3f target=(%.2f,%.2f) robot=(%.2f,%.2f)\n",
+                   plan_updates, plan_stops, reached_once, sqrt(dx*dx + dy*dy),
+                   target_x, target_y, qpos[0], qpos[1]);
+        }
         return (isfinite(qpos[2]) && qpos[2]>0.3)?0:1;
     }
     CloseWindow();

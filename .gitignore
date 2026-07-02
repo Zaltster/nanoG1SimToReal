@@ -26,6 +26,10 @@ wandb/
 runs/
 outputs/
 puffer_logs/
+data/
+datasets/
+recordings/
+captures/
 *.tar
 *.tar.gz
 *.tgz
@@ -35,6 +39,12 @@ puffer_logs/
 *.webm
 *.csv
 *.jsonl
+*.npz
+*.npy
+*.pkl
+*.parquet
+*.h5
+*.hdf5
 
 # logs / misc
 logs/

@@ -26,6 +26,8 @@ train = [
 ]
 # only needed to regenerate the baked G1 assets (tools/*.py) — the repo ships them
 assets = ["mujoco==3.9.0", "numpy"]
+# MuJoCo RGB/depth camera sandbox for testing perception + command-wrapper glue.
+perception = ["mujoco==3.9.0", "numpy", "pillow", "playground==0.2.0"]
 # real-robot deployment (deploy/). unitree_sdk2py is not on PyPI — install from
 # github.com/unitreerobotics/unitree_sdk2_python (see deploy/README.md)
 deploy = ["numpy"]

@@ -22,6 +22,17 @@ git -C vendor/PufferLib fetch -q origin "$BRANCH" || true
 git -C vendor/PufferLib checkout -q "$PIN"
 echo -n "engine pinned at: "; git -C vendor/PufferLib log --oneline -1
 
+PATCH="$PWD/patches/pufferlib-g1-sim2real.patch"
+if [ -f "$PATCH" ]; then
+  if git -C vendor/PufferLib apply --reverse --check "$PATCH" >/dev/null 2>&1; then
+    echo "local engine patch already applied: $(basename "$PATCH")"
+  else
+    git -C vendor/PufferLib apply --check "$PATCH"
+    git -C vendor/PufferLib apply "$PATCH"
+    echo "applied local engine patch: $(basename "$PATCH")"
+  fi
+fi
+
 echo
 echo "✓ setup done. Next:"
 echo "    python train_local.py --smoke  # local/Spark stack check"

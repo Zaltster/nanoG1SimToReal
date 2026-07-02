@@ -1303,6 +1303,12 @@ assets = [
 deploy = [
     { name = "numpy" },
 ]
+perception = [
+    { name = "mujoco" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "playground" },
+]
 train = [
     { name = "gpytorch" },
     { name = "jax" },
@@ -1322,10 +1328,14 @@ requires-dist = [
     { name = "gpytorch", marker = "extra == 'train'" },
     { name = "jax", marker = "extra == 'train'" },
     { name = "mujoco", marker = "extra == 'assets'", specifier = "==3.9.0" },
+    { name = "mujoco", marker = "extra == 'perception'", specifier = "==3.9.0" },
     { name = "mujoco", marker = "extra == 'train'", specifier = "==3.9.0" },
     { name = "numpy", marker = "extra == 'assets'" },
     { name = "numpy", marker = "extra == 'deploy'" },
+    { name = "numpy", marker = "extra == 'perception'" },
     { name = "numpy", marker = "extra == 'train'" },
+    { name = "pillow", marker = "extra == 'perception'" },
+    { name = "playground", marker = "extra == 'perception'", specifier = "==0.2.0" },
     { name = "playground", marker = "extra == 'train'", specifier = "==0.2.0" },
     { name = "pybind11", marker = "extra == 'train'" },
     { name = "rich", marker = "extra == 'train'" },
@@ -1334,7 +1344,7 @@ requires-dist = [
     { name = "setuptools", marker = "extra == 'train'" },
     { name = "wandb", marker = "extra == 'train'" },
 ]
-provides-extras = ["train", "assets", "deploy"]
+provides-extras = ["train", "assets", "perception", "deploy"]
 
 [[package]]
 name = "narwhals"

@@ -35,7 +35,26 @@ Inference uses the *same* PufferNet forward as the browser demo and `eval.py`
 ```bash
 python deploy/deploy_g1.py --net eth0            # walk in place (zero command)
 python deploy/deploy_g1.py --net eth0 --teleop   # WASD: w/s = forward/back, a/d = turn, space = stop
+python deploy/deploy_g1.py --net eth0 --go-to 1.0 1.0
+python deploy/deploy_g1.py --net en0 --dashboard-command-url http://127.0.0.1:8094/target.json  # controller on the Mac
+python deploy/deploy_g1.py --net eth0 --dashboard-command-url http://192.168.0.135:8094/target.json # controller on the robot
 ```
+
+`--go-to X Y` is a high-level waypoint command in meters, relative to the
+robot's starting pose: `X` is forward and `Y` is left. The deploy script
+converts it into the policy's normal `[vx, vy, yaw_rate]` command. The current
+implementation estimates relative position by integrating commanded velocity
+and IMU yaw, so it is suitable only for cautious first tests in a clear space.
+For reliable real-world navigation, replace that pose estimate with motion
+capture, VIO, SLAM, or robot odometry.
+
+`--dashboard-command-url` makes the controller poll the browser follow dashboard.
+The dashboard must be started with `--allow-browser-motion-control`; its GO/STOP
+button only changes the `/target.json` motion state. The dashboard process never
+publishes Unitree commands. The low-level deploy process still owns the 50 Hz
+DDS loop, holds `HOME` while the browser is STOP, and only feeds visual
+`vx/vy/wz` commands to the walking policy while the browser state is GO, the
+target is fresh, and the dashboard safety stop is clear.
 
 Sequence the script enforces:
 1. **Zero-torque** (~1 s) — robot goes limp; support it.
@@ -60,6 +79,9 @@ These are transcribed from the training reference (`web/g1_demo.c`,
 
 - Start with `--net` only (zero command). Once it stands and steps cleanly while
   suspended, lower it to the ground, then introduce small forward commands.
+- Treat `--go-to` as the next layer above teleop, not as proof of autonomous
+  navigation. Test tiny targets first, for example `--go-to 0.2 0.0`, then stop
+  and inspect drift before trying diagonal targets.
 - If it's twitchy, lower leg `KP` slightly or add a low-pass on the action.
 - The observation/scales are fixed by training — **do not change them** or the
   policy sees out-of-distribution input.

@@ -1,0 +1,431 @@
+diff --git a/ocean/g1gpu/g1_gpu.cu b/ocean/g1gpu/g1_gpu.cu
+index 2d1a25fc..2cb6986b 100644
+--- a/ocean/g1gpu/g1_gpu.cu
++++ b/ocean/g1gpu/g1_gpu.cu
+@@ -55,6 +55,85 @@
+ #define ENV_TERM_HEIGHT 0.35f
+ #define ENV_TERM_GRAVITY_Z (-0.6f)
+ #define ENV_CMD_RESAMPLE 500
++#ifdef G1_DOMAIN_RANDOMIZATION
++#ifndef G1_DR_RESET_QPOS
++#define G1_DR_RESET_QPOS 0.08f
++#endif
++#ifndef G1_DR_RESET_LINVEL
++#define G1_DR_RESET_LINVEL 0.20f
++#endif
++#ifndef G1_DR_RESET_ANGVEL
++#define G1_DR_RESET_ANGVEL 0.25f
++#endif
++#ifndef G1_DR_CMD_MIN
++#define G1_DR_CMD_MIN 0.60f
++#endif
++#ifndef G1_DR_CMD_MAX
++#define G1_DR_CMD_MAX 1.15f
++#endif
++#ifndef G1_DR_MOTOR_MIN
++#define G1_DR_MOTOR_MIN 0.85f
++#endif
++#ifndef G1_DR_MOTOR_MAX
++#define G1_DR_MOTOR_MAX 1.15f
++#endif
++#ifndef G1_DR_FRICTION_MIN
++#define G1_DR_FRICTION_MIN 0.55f
++#endif
++#ifndef G1_DR_FRICTION_MAX
++#define G1_DR_FRICTION_MAX 1.25f
++#endif
++#ifndef G1_ZERO_CMD_PROB
++#define G1_ZERO_CMD_PROB 0.10f
++#endif
++#ifndef G1_NONZERO_CMD_MIN
++#define G1_NONZERO_CMD_MIN 0.20f
++#endif
++#ifndef G1_ANTISTALL_VEL
++#define G1_ANTISTALL_VEL 0.12f
++#endif
++#ifndef G1_W_ANTISTALL
++#define G1_W_ANTISTALL 0.0f
++#endif
++#ifndef G1_PUSH_MIN_TICKS
++#define G1_PUSH_MIN_TICKS 120
++#endif
++#ifndef G1_PUSH_MAX_TICKS
++#define G1_PUSH_MAX_TICKS 360
++#endif
++#ifndef G1_PUSH_PROB
++#define G1_PUSH_PROB 0.35f
++#endif
++#ifndef G1_PUSH_LINVEL
++#define G1_PUSH_LINVEL 0.25f
++#endif
++#ifndef G1_PUSH_ANGVEL
++#define G1_PUSH_ANGVEL 0.35f
++#endif
++#ifndef G1_PUSH_ZVEL
++#define G1_PUSH_ZVEL 0.0f
++#endif
++#else
++#define G1_DR_RESET_QPOS ENV_RESET_NOISE
++#define G1_DR_RESET_LINVEL 0.0f
++#define G1_DR_RESET_ANGVEL 0.0f
++#define G1_DR_CMD_MIN 1.0f
++#define G1_DR_CMD_MAX 1.0f
++#define G1_DR_MOTOR_MIN 1.0f
++#define G1_DR_MOTOR_MAX 1.0f
++#define G1_DR_FRICTION_MIN 1.0f
++#define G1_DR_FRICTION_MAX 1.0f
++#define G1_ZERO_CMD_PROB 0.10f
++#define G1_NONZERO_CMD_MIN 0.20f
++#define G1_ANTISTALL_VEL 0.12f
++#define G1_W_ANTISTALL 0.0f
++#define G1_PUSH_MIN_TICKS 1000000000
++#define G1_PUSH_MAX_TICKS 1000000000
++#define G1_PUSH_PROB 0.0f
++#define G1_PUSH_LINVEL 0.0f
++#define G1_PUSH_ANGVEL 0.0f
++#define G1_PUSH_ZVEL 0.0f
++#endif
+ #ifdef G1_TASK_V3
+ #define ENV_OBS 98
+ // --- task v3 gait-shaping constants (KEEP IN SYNC: g1.h / stagedenv.cu /
+@@ -70,6 +149,12 @@
+ #define G1_V3_NUM_ACT 12
+ #define G1_V3_W_BASE_HEIGHT (-10.0f)   // unitree base_height penalty
+ #define G1_V3_BASE_Z0 0.78f            // target pelvis height (m)
++#ifndef G1_V3_MIN_FOOT_SEP
++#define G1_V3_MIN_FOOT_SEP 0.10f       // left foot must stay this far left of right foot
++#endif
++#ifndef G1_V3_W_FOOT_SEP
++#define G1_V3_W_FOOT_SEP (-12.0f)      // penalize feet touching/crossing
++#endif
+ #else
+ #define ENV_OBS 96
+ #endif
+@@ -99,6 +184,13 @@ __device__ __forceinline__ float urand_pm1(unsigned int* s) {
+ __device__ __forceinline__ float urand_01(unsigned int* s) {
+     return (xorshift32(s) >> 8) * (1.0f / 16777216.0f);
+ }
++__device__ __forceinline__ float urand_range(unsigned int* s, float lo, float hi) {
++    return lo + (hi - lo) * urand_01(s);
++}
++__device__ __forceinline__ int irand_range(unsigned int* s, int lo, int hi) {
++    int span = hi - lo + 1;
++    return lo + (int)(urand_01(s) * (float)span);
++}
+ __device__ __forceinline__ void world_to_base(const float q[4], const float v[3],
+                                               float out[3]) {
+     float qinv[4] = {q[0], -q[1], -q[2], -q[3]};
+@@ -138,8 +230,8 @@ __global__ void k_init_consts(void) {
+ 
+ __device__ void env_reset_g(int e, int lane, unsigned int* g_rng,
+                             float* g_qpos, float* g_qvel, float* g_ws,
+-                            float* g_prev, float* g_cmd, int* g_tick,
+-                            float* g_eplog) {
++                            float* g_prev, float* g_cmd, float* g_dr,
++                            int* g_tick, int* g_next_push, float* g_eplog) {
+     for (int k = lane; k < S_NQ; k += 32) g_qpos[(size_t)e * S_NQ + k] = g1c_key_qpos[k];
+     for (int k = lane; k < S_NV; k += 32) {
+         g_qvel[(size_t)e * S_NV + k] = 0.0f;
+@@ -150,13 +242,26 @@ __device__ void env_reset_g(int e, int lane, unsigned int* g_rng,
+     if (lane == 0) {
+         unsigned int rng = g_rng[e];
+         for (int j = 0; j < S_NU; j++)
+-            g_qpos[(size_t)e * S_NQ + 7 + j] += ENV_RESET_NOISE * urand_pm1(&rng);
+-        if (urand_01(&rng) < 0.1f) {
++            g_qpos[(size_t)e * S_NQ + 7 + j] += G1_DR_RESET_QPOS * urand_pm1(&rng);
++        g_qvel[(size_t)e * S_NV + 0] = G1_DR_RESET_LINVEL * urand_pm1(&rng);
++        g_qvel[(size_t)e * S_NV + 1] = G1_DR_RESET_LINVEL * urand_pm1(&rng);
++        g_qvel[(size_t)e * S_NV + 2] = 0.5f * G1_DR_RESET_LINVEL * urand_pm1(&rng);
++        g_qvel[(size_t)e * S_NV + 3] = G1_DR_RESET_ANGVEL * urand_pm1(&rng);
++        g_qvel[(size_t)e * S_NV + 4] = G1_DR_RESET_ANGVEL * urand_pm1(&rng);
++        g_qvel[(size_t)e * S_NV + 5] = G1_DR_RESET_ANGVEL * urand_pm1(&rng);
++        float cmd_mult = urand_range(&rng, G1_DR_CMD_MIN, G1_DR_CMD_MAX);
++        float motor_mult = urand_range(&rng, G1_DR_MOTOR_MIN, G1_DR_MOTOR_MAX);
++        float friction_mult = urand_range(&rng, G1_DR_FRICTION_MIN, G1_DR_FRICTION_MAX);
++        g_dr[3 * e + 0] = cmd_mult;
++        g_dr[3 * e + 1] = motor_mult;
++        g_dr[3 * e + 2] = friction_mult;
++        g_next_push[e] = irand_range(&rng, G1_PUSH_MIN_TICKS, G1_PUSH_MAX_TICKS);
++        if (urand_01(&rng) < G1_ZERO_CMD_PROB) {
+             g_cmd[3 * e] = g_cmd[3 * e + 1] = g_cmd[3 * e + 2] = 0.0f;
+         } else {
+-            g_cmd[3 * e + 0] = g1e_cmd_scale * 1.0f * urand_pm1(&rng);
+-            g_cmd[3 * e + 1] = g1e_cmd_scale * 0.6f * urand_pm1(&rng);
+-            g_cmd[3 * e + 2] = g1e_cmd_scale * 1.0f * urand_pm1(&rng);
++            g_cmd[3 * e + 0] = g1e_cmd_scale * cmd_mult * 1.0f * urand_pm1(&rng);
++            g_cmd[3 * e + 1] = g1e_cmd_scale * cmd_mult * 0.6f * urand_pm1(&rng);
++            g_cmd[3 * e + 2] = g1e_cmd_scale * cmd_mult * 1.0f * urand_pm1(&rng);
+         }
+         g_rng[e] = rng;
+         g_tick[e] = 0;
+@@ -170,8 +275,8 @@ __device__ void env_reset_g(int e, int lane, unsigned int* g_rng,
+ 
+ __global__ void k_reset_all(int n, unsigned int seed, unsigned int* g_rng,
+                             float* g_qpos, float* g_qvel, float* g_ws,
+-                            float* g_prev, float* g_cmd, int* g_tick,
+-                            float* g_eplog) {
++                            float* g_prev, float* g_cmd, float* g_dr,
++                            int* g_tick, int* g_next_push, float* g_eplog) {
+     int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+     int e = blockIdx.x * SWARPS + warp;
+     if (e >= n) return;
+@@ -180,7 +285,8 @@ __global__ void k_reset_all(int n, unsigned int seed, unsigned int* g_rng,
+         for (int k = 0; k < EPLOG_N; k++) g_eplog[(size_t)e * EPLOG_N + k] = 0.0f;
+     }
+     __syncwarp();
+-    env_reset_g(e, lane, g_rng, g_qpos, g_qvel, g_ws, g_prev, g_cmd, g_tick, g_eplog);
++    env_reset_g(e, lane, g_rng, g_qpos, g_qvel, g_ws, g_prev, g_cmd, g_dr,
++                g_tick, g_next_push, g_eplog);
+ }
+ 
+ // write the 96-float obs of the current state (used post-reset and in K_epi)
+@@ -222,6 +328,7 @@ __global__ void k_obs_all(int n, const float* g_qpos, const float* g_qvel,
+ 
+ // actions (vec gpu_actions) -> clamped a + PD ctrl
+ __global__ void k_act(int n, const float* __restrict__ vec_actions,
++                      const float* __restrict__ g_dr,
+                       float* __restrict__ g_act, float* __restrict__ g_ctrl) {
+     int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+     int e = blockIdx.x * SWARPS + warp;
+@@ -232,7 +339,7 @@ __global__ void k_act(int n, const float* __restrict__ vec_actions,
+         if (j >= G1_V3_NUM_ACT) a = 0.0f;   // legs-only actions
+ #endif
+         g_act[(size_t)e * S_NU + j] = a;
+-        float target = g1c_key_ctrl[j] + g1e_action_scale * a;
++        float target = g1c_key_ctrl[j] + (g1e_action_scale * g_dr[3 * e + 1]) * a;
+         float lo = g1c_act_ctrlrange[2 * j], hi = g1c_act_ctrlrange[2 * j + 1];
+         g_ctrl[(size_t)e * S_NU + j] = target < lo ? lo : (target > hi ? hi : target);
+     }
+@@ -247,7 +354,9 @@ __global__ void k_epi(int n,
+                       const float* __restrict__ g_af,
+                       const float* __restrict__ g_act,
+                       float* __restrict__ g_prev, float* __restrict__ g_cmd,
+-                      int* __restrict__ g_tick, unsigned int* __restrict__ g_rng,
++                      float* __restrict__ g_dr,
++                      int* __restrict__ g_tick, int* __restrict__ g_next_push,
++                      unsigned int* __restrict__ g_rng,
+                       float* __restrict__ g_eplog,
+                       float* __restrict__ vec_obs, float* __restrict__ vec_rew,
+                       float* __restrict__ vec_term) {
+@@ -256,7 +365,7 @@ __global__ void k_epi(int n,
+     int e = blockIdx.x * SWARPS + warp;
+     if (e >= n) return;
+     const float* qpos = g_qpos + (size_t)e * S_NQ;
+-    const float* qvel = g_qvel + (size_t)e * S_NV;
++    float* qvel = g_qvel + (size_t)e * S_NV;
+     float* eplog = g_eplog + (size_t)e * EPLOG_N;
+ 
+     if (lane == 0) g_tick[e] += 1;
+@@ -276,6 +385,24 @@ __global__ void k_epi(int n,
+         ar2 += __shfl_xor_sync(0xffffffff, ar2, o);
+     }
+     if (lane == 0) {
++        unsigned int rng = g_rng[e];
++        float cmd_norm_pre = sqrtf(g_cmd[3*e] * g_cmd[3*e] +
++                                   g_cmd[3*e+1] * g_cmd[3*e+1]);
++        if (g_tick[e] >= g_next_push[e]) {
++            if (cmd_norm_pre > G1_NONZERO_CMD_MIN && urand_01(&rng) < G1_PUSH_PROB) {
++                float a = 6.28318530718f * urand_01(&rng);
++                float mag = G1_PUSH_LINVEL * (0.5f + 0.5f * urand_01(&rng));
++                qvel[0] += mag * cosf(a);
++                qvel[1] += mag * sinf(a);
++                qvel[2] -= G1_PUSH_ZVEL * (0.5f + 0.5f * urand_01(&rng));
++                qvel[3] += G1_PUSH_ANGVEL * urand_pm1(&rng);
++                qvel[4] += G1_PUSH_ANGVEL * urand_pm1(&rng);
++                qvel[5] += 0.5f * G1_PUSH_ANGVEL * urand_pm1(&rng);
++            }
++            g_next_push[e] = g_tick[e] + irand_range(&rng, G1_PUSH_MIN_TICKS,
++                                                     G1_PUSH_MAX_TICKS);
++            g_rng[e] = rng;
++        }
+         float vb[3], pg[3];
+         float gw[3] = {0.0f, 0.0f, -1.0f};
+         world_to_base(qpos + 3, qvel, vb);
+@@ -311,6 +438,14 @@ __global__ void k_epi(int n,
+ #else
+                 + g1e_w_action_rate * ar2;
+ #endif
++#ifdef G1_REWARD_ANTISTALL
++        float cmd_norm = sqrtf(g_cmd[3*e] * g_cmd[3*e] + g_cmd[3*e+1] * g_cmd[3*e+1]);
++        float speed_xy = sqrtf(vb[0] * vb[0] + vb[1] * vb[1]);
++        if (cmd_norm > G1_NONZERO_CMD_MIN && speed_xy < G1_ANTISTALL_VEL) {
++            float miss = (G1_ANTISTALL_VEL - speed_xy) / G1_ANTISTALL_VEL;
++            r += G1_W_ANTISTALL * miss * miss;
++        }
++#endif
+ #ifdef G1_TASK_V3
+         {
+             int tk = g_tick[e];
+@@ -336,6 +471,20 @@ __global__ void k_epi(int n,
+                 hp += dq * dq;
+             }
+             r += G1_V3_W_HIP * hp;
++            float fdw[3] = {
++                g_xpos[(size_t)e * S_X3 + 3 * G1_V3_LFOOT_BODY + 0] -
++                    g_xpos[(size_t)e * S_X3 + 3 * G1_V3_RFOOT_BODY + 0],
++                g_xpos[(size_t)e * S_X3 + 3 * G1_V3_LFOOT_BODY + 1] -
++                    g_xpos[(size_t)e * S_X3 + 3 * G1_V3_RFOOT_BODY + 1],
++                g_xpos[(size_t)e * S_X3 + 3 * G1_V3_LFOOT_BODY + 2] -
++                    g_xpos[(size_t)e * S_X3 + 3 * G1_V3_RFOOT_BODY + 2],
++            };
++            float fdb[3];
++            world_to_base(qpos + 3, fdw, fdb);
++            float foot_sep_miss = (G1_V3_MIN_FOOT_SEP - fdb[1]) / G1_V3_MIN_FOOT_SEP;
++            if (foot_sep_miss > 0.0f) {
++                r += G1_V3_W_FOOT_SEP * foot_sep_miss * foot_sep_miss * upr;
++            }
+             float dzb = qpos[2] - G1_V3_BASE_Z0;
+             r += G1_V3_W_BASE_HEIGHT * dzb * dzb;   // unitree base_height
+         }
+@@ -380,16 +529,17 @@ __global__ void k_epi(int n,
+     int done = s_fell[warp] || s_to[warp];
+ 
+     if (done) {
+-        env_reset_g(e, lane, g_rng, g_qpos, g_qvel, g_ws, g_prev, g_cmd, g_tick,
+-                    g_eplog);
++        env_reset_g(e, lane, g_rng, g_qpos, g_qvel, g_ws, g_prev, g_cmd, g_dr,
++                    g_tick, g_next_push, g_eplog);
+     } else if (lane == 0 && g_tick[e] % ENV_CMD_RESAMPLE == 0) {
+         unsigned int rng = g_rng[e];
+-        if (urand_01(&rng) < 0.1f) {
++        float cmd_mult = g_dr[3 * e + 0];
++        if (urand_01(&rng) < G1_ZERO_CMD_PROB) {
+             g_cmd[3*e] = g_cmd[3*e+1] = g_cmd[3*e+2] = 0.0f;
+         } else {
+-            g_cmd[3*e+0] = g1e_cmd_scale * 1.0f * urand_pm1(&rng);
+-            g_cmd[3*e+1] = g1e_cmd_scale * 0.6f * urand_pm1(&rng);
+-            g_cmd[3*e+2] = g1e_cmd_scale * 1.0f * urand_pm1(&rng);
++            g_cmd[3*e+0] = g1e_cmd_scale * cmd_mult * 1.0f * urand_pm1(&rng);
++            g_cmd[3*e+1] = g1e_cmd_scale * cmd_mult * 0.6f * urand_pm1(&rng);
++            g_cmd[3*e+2] = g1e_cmd_scale * cmd_mult * 1.0f * urand_pm1(&rng);
+         }
+         g_rng[e] = rng;
+     }
+@@ -414,8 +564,8 @@ static float *p_scal, *p_H, *p_cJ, *p_condist;
+ static int* p_hvalid;
+ static float* p_footc;  // per-env {L,R} foot contact flags (k5 -> k_epi)  // H-memo cache flags; nullptr = memo off (large batch)
+ static int *p_ncon, *p_nefc, *p_rowtype, *p_rowdof, *p_rowstash, *p_state;
+-static float *p_act, *p_prev, *p_cmd, *p_eplog;
+-static int* p_tick;
++static float *p_act, *p_prev, *p_cmd, *p_dr, *p_eplog;
++static int *p_tick, *p_next_push;
+ static unsigned int* p_rng;
+ static float* h_eplog = NULL;
+ 
+@@ -493,15 +643,18 @@ extern "C" void my_gpu_init(int total_agents, unsigned int seed) {
+     G1GPU_MALLOC(p_act, (size_t)n * S_NU);
+     G1GPU_MALLOC(p_prev, (size_t)n * S_NU);
+     G1GPU_MALLOC(p_cmd, (size_t)n * 3);
++    G1GPU_MALLOC(p_dr, (size_t)n * 3);
+     G1GPU_MALLOC(p_eplog, (size_t)n * EPLOG_N);
+     CUDA_CHECK(cudaMalloc(&p_tick, (size_t)n * 4));
++    CUDA_CHECK(cudaMalloc(&p_next_push, (size_t)n * 4));
+     CUDA_CHECK(cudaMalloc(&p_rng, (size_t)n * 4));
+     h_eplog = (float*)malloc((size_t)n * EPLOG_N * 4);
+ 
+     k_init_consts<<<1, 256>>>();
+     int blocks = (n + SWARPS - 1) / SWARPS;
+     k_reset_all<<<blocks, 32 * SWARPS>>>(n, seed, p_rng, p_qpos, p_qvel, p_ws,
+-                                         p_prev, p_cmd, p_tick, p_eplog);
++                                         p_prev, p_cmd, p_dr, p_tick,
++                                         p_next_push, p_eplog);
+     CUDA_CHECK(cudaGetLastError());
+     CUDA_CHECK(cudaDeviceSynchronize());
+     printf("g1gpu: initialized %d GPU-native envs (no libmujoco)\n", n);
+@@ -511,7 +664,8 @@ extern "C" void my_gpu_reset(void* vec_gpu_obs) {
+     int n = g_total;
+     int blocks = (n + SWARPS - 1) / SWARPS;
+     k_reset_all<<<blocks, 32 * SWARPS>>>(n, 12345u, p_rng, p_qpos, p_qvel, p_ws,
+-                                         p_prev, p_cmd, p_tick, p_eplog);
++                                         p_prev, p_cmd, p_dr, p_tick,
++                                         p_next_push, p_eplog);
+     k_obs_all<<<blocks, 32 * SWARPS>>>(n, p_qpos, p_qvel, p_prev, p_cmd,
+                                        p_tick, (float*)vec_gpu_obs);
+     CUDA_CHECK(cudaGetLastError());
+@@ -589,8 +743,10 @@ extern "C" void my_gpu_step_range(void* stream_v, int start, int count,
+     float* act = p_act + s * S_NU;
+     float* prev = p_prev + s * S_NU;
+     float* cmd = p_cmd + s * 3;
++    float* dr = p_dr + s * 3;
+     float* eplog = p_eplog + s * EPLOG_N;
+     int* tick = p_tick + s;
++    int* next_push = p_next_push + s;
+     unsigned int* rng = p_rng + s;
+     const float* va = vec_actions;             // caller passes offset pointers
+     float* vo = (float*)vec_obs;
+@@ -602,7 +758,7 @@ extern "C" void my_gpu_step_range(void* stream_v, int start, int count,
+     // st, fixed sequence (decimation/SOL_ITER compile-time), per-buffer-stable
+     // pointers -> safe to CUDA-graph-capture.
+     auto step_body = [&]() {
+-    k_act<<<blocks, tpb, 0, st>>>(n, va, act, ctrl);
++    k_act<<<blocks, tpb, 0, st>>>(n, va, dr, act, ctrl);
+ #ifndef SKIP_PHYSICS   // ceiling probe: skip the entire physics decimation loop
+                        // (k1..k4). Only k_act + k_epi run -> env GPU work ~0.
+                        // If training SPS is unchanged vs baseline, the physics is
+@@ -618,7 +774,7 @@ extern "C" void my_gpu_step_range(void* stream_v, int start, int count,
+         // lane-0 solve; bit-identical). Thread-per-env grid, not warp-per-env.
+         k3b_ldlsolve<<<(n + 255) / 256, 256, 0, st>>>(n, qfs, qLD, qLDiagInv, qas);
+ #endif
+-        k5_assemble<<<blocks, tpb, 0, st>>>(n, qpos, qvel, xpos, xquat, com, ncon,
++        k5_assemble<<<blocks, tpb, 0, st>>>(n, qpos, qvel, xpos, xquat, com, dr, ncon,
+                                             nefc, condist, rowtype, rowdof, rowsign,
+                                             rowstash, rpos, D, R, aref, cJ, cdof,
+                                             footc);
+@@ -667,7 +823,7 @@ extern "C" void my_gpu_step_range(void* stream_v, int start, int count,
+     }
+ #endif  // SKIP_PHYSICS
+     k_epi<<<blocks, tpb, 0, st>>>(n, qpos, qvel, ws, xpos, footc, af, act, prev,
+-                                  cmd, tick, rng, eplog, vo, vr, vt);
++                                  cmd, dr, tick, next_push, rng, eplog, vo, vr, vt);
+     };
+ 
+ #ifdef GRAPH_ENV_STEP
+diff --git a/ocean/g1gpu/g1phys/g1_staged_kernels.cuh b/ocean/g1gpu/g1phys/g1_staged_kernels.cuh
+index c879fbb5..e714e3b5 100644
+--- a/ocean/g1gpu/g1phys/g1_staged_kernels.cuh
++++ b/ocean/g1gpu/g1phys/g1_staged_kernels.cuh
+@@ -546,6 +546,7 @@ __global__ void k5_assemble(int n, const float* __restrict__ g_qpos,
+                             const float* __restrict__ g_xpos,
+                             const float* __restrict__ g_xquat,
+                             const float* __restrict__ g_gcom,
++                            const float* __restrict__ g_dr,
+                             int* __restrict__ g_ncon, int* __restrict__ g_nefc,
+                             float* __restrict__ g_condist,
+                             int* __restrict__ g_rowtype, int* __restrict__ g_rowdof,
+@@ -580,6 +581,7 @@ __global__ void k5_assemble(int n, const float* __restrict__ g_qpos,
+     float* cnorm = s_cnorm[warp];
+     int* cpair = s_cpair[warp];
+     int* cnt = s_cnt[warp];
++    float friction_scale = g_dr ? g_dr[3 * e + 2] : 1.0f;
+ 
+     for (int k = lane; k < S_X3; k += 32) xpos[k] = g_xpos[(size_t)e * S_X3 + k];
+     for (int k = lane; k < S_X4; k += 32) xquat[k] = g_xquat[(size_t)e * S_X4 + k];
+@@ -728,8 +730,8 @@ __global__ void k5_assemble(int n, const float* __restrict__ g_qpos,
+             }
+             crow += 1;
+         } else {
+-            float mu0 = g1c_pair_friction[5 * p + 0];
+-            float mu1 = g1c_pair_friction[5 * p + 1];
++            float mu0 = friction_scale * g1c_pair_friction[5 * p + 0];
++            float mu1 = friction_scale * g1c_pair_friction[5 * p + 1];
+             for (int i = lane; i < G1_NV; i += 32) {
+                 float j0 = jd[0 * G1_NV + i], j1 = jd[1 * G1_NV + i], j2 = jd[2 * G1_NV + i];
+                 gcJ[(crow + 0) * G1_NV + i] = j0 + mu0 * j1;
+@@ -788,7 +790,7 @@ __global__ void k5_assemble(int n, const float* __restrict__ g_qpos,
+                 dA = tran;
+             } else {
+                 int k_in = (rd - (rd / 4) * 4) / 2;
+-                float mu = g1c_pair_friction[5 * p + k_in];
++                float mu = friction_scale * g1c_pair_friction[5 * p + k_in];
+                 dA = tran + mu * mu * tran;
+             }
+         }
+@@ -816,7 +818,7 @@ __global__ void k5_assemble(int n, const float* __restrict__ g_qpos,
+                 int r0 = r - 3;   // rows r0..r0+3 are this contact's pyramid
+                 float R0 = g_R[(size_t)e * NEFC_MAX + r0];
+                 float R1 = R0 / SOL_IMPRATIO;
+-                float mu = g1c_pair_friction[5 * p] * sqrtf(R1 / R0);
++                float mu = friction_scale * g1c_pair_friction[5 * p] * sqrtf(R1 / R0);
+                 float Rpy = 2.0f * mu * mu * R0;
+                 for (int k = 0; k < 4; k++) g_R[(size_t)e * NEFC_MAX + r0 + k] = Rpy;
+                 r = r0 - 1;

@@ -76,6 +76,7 @@ def main() -> int:
     last_ckpt_counter = int(state.get("last_ckpt_counter", 0))
     last_progress_source = str(state.get("last_progress_source", "watchdog_start"))
     metrics_stall_warned = bool(state.get("metrics_stall_warned", False))
+    metrics_hard_stall_warned = bool(state.get("metrics_hard_stall_warned", False))
 
     metrics_mtime = file_mtime(out / "fall_metrics.jsonl")
     train_mtime = file_mtime(out / "train.log")
@@ -99,6 +100,7 @@ def main() -> int:
         last_real_progress_ts = now
         last_progress_source = "metrics_or_log"
         metrics_stall_warned = False
+        metrics_hard_stall_warned = False
 
     if ckpt_counter > last_ckpt_counter:
         last_ckpt_counter = ckpt_counter
@@ -106,25 +108,43 @@ def main() -> int:
         last_progress_source = "checkpoint"
 
     progress_age = now - last_real_progress_ts
+    metrics_age = now - metrics_mtime if metrics_mtime else -1
+    train_log_age = now - train_mtime if train_mtime else -1
+    output_age = now - output_mtime if output_mtime else -1
     action = "ok"
     reason = ""
 
-    if (
+    metrics_stale_while_checkpoints_advance = (
         output_mtime > 0
-        and now - output_mtime >= args.stall_seconds
+        and output_age >= args.stall_seconds
         and ckpt_counter > 0
         and last_progress_source == "checkpoint"
-        and not metrics_stall_warned
-    ):
+    )
+    metrics_hard_stale_while_checkpoints_advance = (
+        metrics_stale_while_checkpoints_advance
+        and output_age >= args.hard_stall_seconds
+    )
+
+    if metrics_hard_stale_while_checkpoints_advance:
         reason = (
-            f"metrics/log output stalled for {now - output_mtime}s, "
+            f"metrics/log output hard-stalled for {output_age}s while checkpoints advanced "
+            f"to {ckpt_counter}; keeping trainer alive but marking logging visibility stale"
+        )
+        if not metrics_hard_stall_warned:
+            append_log(out / "spark_watchdog.log", f"{iso_now()} {reason}")
+        metrics_stall_warned = True
+        metrics_hard_stall_warned = True
+        action = "metrics_hard_stale"
+    elif metrics_stale_while_checkpoints_advance:
+        reason = (
+            f"metrics/log output stalled for {output_age}s, "
             f"but checkpoints are still advancing at counter {ckpt_counter}; keeping trainer alive"
         )
-        append_log(out / "spark_watchdog.log", f"{iso_now()} {reason}")
+        if not metrics_stall_warned:
+            append_log(out / "spark_watchdog.log", f"{iso_now()} {reason}")
         metrics_stall_warned = True
         action = "metrics_stale"
-
-    if progress_age >= args.stall_seconds:
+    elif progress_age >= args.stall_seconds:
         if gpu_active and progress_age < args.hard_stall_seconds:
             reason = (
                 f"observable training progress stale for {progress_age}s, "
@@ -146,6 +166,9 @@ def main() -> int:
         "last_output_mtime_unix": last_output_mtime,
         "checkpoint_counter": ckpt_counter,
         "checkpoint_count": ckpt_count,
+        "metrics_age_s": metrics_age,
+        "train_log_age_s": train_log_age,
+        "output_age_s": output_age,
         "gpu_util_pct": gpu_util,
         "gpu_sample_age_s": gpu_age,
         "gpu_active": gpu_active,
@@ -164,10 +187,11 @@ def main() -> int:
             "last_ckpt_counter": last_ckpt_counter,
             "last_progress_source": last_progress_source,
             "metrics_stall_warned": metrics_stall_warned,
+            "metrics_hard_stall_warned": metrics_hard_stall_warned,
         },
     )
     print(json.dumps(payload, sort_keys=True), flush=True)
-    return {"ok": 0, "metrics_stale": 10, "gpu_grace": 20, "stop": 30}[action]
+    return {"ok": 0, "metrics_stale": 10, "metrics_hard_stale": 10, "gpu_grace": 20, "stop": 30}[action]
 
 
 if __name__ == "__main__":
